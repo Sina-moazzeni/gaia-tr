@@ -54,6 +54,7 @@ import {
   resetKeyCooldown,
   resetAllKeyCooldowns,
   resetKeyStats,
+  auditAndFixEnglishCues,
   ServerSubtitleProject
 } from './src/server/database';
 import {
@@ -2643,6 +2644,22 @@ app.post('/api/folders/:folderId/resume', (req, res) => {
   try {
     const count = queueFolderForTranslation(req.params.folderId);
     return res.json({ success: true, count, message: `${count} پروژه برای ادامه ترجمه به صف اضافه شدند.` });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message });
+  }
+});
+
+// 14e. Audit and fix English lines left in any projects
+app.post('/api/projects/audit-and-fix', (req, res) => {
+  try {
+    const stats = auditAndFixEnglishCues();
+    return res.json({
+      success: true,
+      ...stats,
+      message: stats.totalFixedCues > 0
+        ? `تعداد ${stats.totalFixedCues} سطر انگلیسی در ${stats.affectedProjectsCount} فایل زیرنویس شناسایی شد، پاکسازی گردید و فایل‌ها جهت ترجمه ۱۰۰٪ فارسی در صف قرار گرفتند.`
+        : 'تمامی فایل‌های زیرنویس سالم هستند و هیچ سطر انگلیسی در فایل‌های تکمیل‌شده یافت نشد.',
+    });
   } catch (err: any) {
     return res.status(500).json({ success: false, error: err?.message });
   }

@@ -1,6 +1,7 @@
 import fs from 'fs';
 import path from 'path';
 import { SubtitleItem } from '../types';
+import { isCueProperlyTranslated } from '../lib/subtitleParser';
 
 export interface ServerFolder {
   id: string;
@@ -88,7 +89,7 @@ function ensureDataDir() {
 const DEFAULT_SERVER_CONFIG: ServerConfig = {
   allowedOrigin: process.env.ALLOWED_ORIGIN?.trim() || '*',
   geminiBaseUrl: process.env.GEMINI_BASE_URL?.trim() || 'https://generativelanguage.googleapis.com',
-  maxConcurrentProjects: 2,
+  maxConcurrentProjects: Number(process.env.MAX_CONCURRENT_PROJECTS) || 4,
 };
 
 function loadDatabaseFromDisk(): SubtitlesDatabase {
@@ -157,9 +158,17 @@ function loadDatabaseFromDisk(): SubtitlesDatabase {
   }
 }
 
+let hasAuditedOnStartup = false;
+
 export function getDatabase(): SubtitlesDatabase {
   if (!inMemoryDb) {
     inMemoryDb = loadDatabaseFromDisk();
+    if (!hasAuditedOnStartup) {
+      hasAuditedOnStartup = true;
+      setTimeout(() => {
+        try { auditAndFixEnglishCues(); } catch {}
+      }, 500);
+    }
   }
   return inMemoryDb;
 }
@@ -417,8 +426,18 @@ export function updateProject(id: string, updates: Partial<ServerSubtitleProject
   if (!project) return null;
 
   Object.assign(project, updates);
+  if (updates.items && Array.isArray(updates.items)) {
+    project.totalCues = project.items.length;
+    project.translatedCues = project.items.filter((i) =>
+      isCueProperlyTranslated(i.originalText, i.translatedText, project.targetLanguage)
+    ).length;
+    if (project.translatedCues >= project.totalCues && project.totalCues > 0) {
+      project.status = 'completed';
+      project.completedAt = project.completedAt || new Date().toISOString();
+    }
+  }
   project.updatedAt = new Date().toISOString();
-  scheduleSaveDatabase();
+  saveDatabaseSync();
   return project;
 }
 
@@ -457,7 +476,7 @@ export function updateServerConfig(updates: Partial<ServerConfig>): ServerConfig
   }
   if (updates.maxConcurrentProjects !== undefined) {
     const val = Number(updates.maxConcurrentProjects);
-    db.serverConfig.maxConcurrentProjects = Math.max(1, Math.min(val || 2, 8));
+    db.serverConfig.maxConcurrentProjects = Math.max(1, Math.min(val || 4, 16));
   }
   saveDatabaseSync();
   return db.serverConfig;
@@ -600,13 +619,23 @@ export function rotateActiveKeyIndex(): number {
 
 // ─── Key Exhaustion & Cooldown Tracking ──────────────────────────────────────
 
-const exhaustedKeysMap = new Map<string, { timestamp: number; reason: string }>();
+export const exhaustedKeysMap = new Map<string, { timestamp: number; reason: string }>();
 // 60 seconds RPM cooldown (Gemini 15 RPM limit resets every minute, NOT 15 minutes!)
 const KEY_EXHAUSTION_COOLDOWN_MS = 60 * 1000;
 
 export function markKeyAsExhausted(key: string, reason: string = 'Quota exhausted (429)'): void {
   exhaustedKeysMap.set(key, { timestamp: Date.now(), reason });
   console.log(`[KeyPool] Key paused in cooldown: ${key.slice(0, 6)}... (${reason}). Cooldown: 60s.`);
+
+  // Rotate this exhausted or busy key to the END of db.serverKeys so fresh active keys are immediately at front!
+  try {
+    const db = getDatabase();
+    if (Array.isArray(db.serverKeys) && db.serverKeys.includes(key) && db.serverKeys.length > 1) {
+      db.serverKeys = db.serverKeys.filter((k) => k !== key);
+      db.serverKeys.push(key);
+      saveDatabaseSync();
+    }
+  } catch {}
 }
 
 export function isKeyExhausted(key: string): boolean {
@@ -617,6 +646,10 @@ export function isKeyExhausted(key: string): boolean {
     return false;
   }
   return true;
+}
+
+export function getExhaustedKeysList(): string[] {
+  return Array.from(exhaustedKeysMap.keys());
 }
 
 export function resetKeyCooldown(key: string): void {
@@ -746,6 +779,62 @@ export function resetProjectTranslation(projectId: string, onlyIncomplete: boole
   project.updatedAt = new Date().toISOString();
   saveDatabaseSync();
   return project;
+}
+
+/**
+ * Auto-audit all subtitle projects on server.
+ * Any cue that has English original text but was left with English translatedText
+ * is reset to empty string ('') so the background worker can properly translate it into Persian.
+ * If a project marked as 'completed' has missing or English cues, its status is reset to 'queued'
+ * so it completes 100% of the lines before moving on.
+ */
+export function auditAndFixEnglishCues(): { totalFixedCues: number; affectedProjectsCount: number } {
+  const db = getDatabase();
+  let totalFixedCues = 0;
+  let affectedProjectsCount = 0;
+
+  db.projects.forEach((project) => {
+    let projectFixed = false;
+    const targetLang = project.targetLanguage || 'fa';
+
+    project.items.forEach((item) => {
+      if (item.translatedText && item.translatedText.trim()) {
+        const isValid = isCueProperlyTranslated(item.originalText, item.translatedText, targetLang);
+        if (!isValid) {
+          item.translatedText = '';
+          totalFixedCues++;
+          projectFixed = true;
+        }
+      }
+    });
+
+    const realTranslatedCount = project.items.filter((i) =>
+      isCueProperlyTranslated(i.originalText, i.translatedText, targetLang)
+    ).length;
+
+    project.translatedCues = realTranslatedCount;
+
+    if (realTranslatedCount < project.totalCues) {
+      if (project.status === 'completed') {
+        project.status = 'queued';
+        project.completedAt = undefined;
+        project.lastError = 'برخی سطرها انگلیسی باقی مانده بودند. سطرها شناسایی شده و جهت ترجمه کامل فارسی در صف قرار گرفتند.';
+        projectFixed = true;
+      }
+    }
+
+    if (projectFixed) {
+      affectedProjectsCount++;
+      project.updatedAt = new Date().toISOString();
+    }
+  });
+
+  if (affectedProjectsCount > 0) {
+    saveDatabaseSync();
+    console.log(`[DB Audit] Fixed ${totalFixedCues} English cues across ${affectedProjectsCount} projects. Re-queued for 100% Persian translation.`);
+  }
+
+  return { totalFixedCues, affectedProjectsCount };
 }
 
 // ─── Database Backup & Restore Operations ────────────────────────────────────

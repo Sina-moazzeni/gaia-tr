@@ -49,7 +49,7 @@ import {
   StopCircle
 } from 'lucide-react';
 import { SubtitleItem, SubtitleFormat, ToneOption } from '../types';
-import { parseSubtitleFile } from '../lib/subtitleParser';
+import { parseSubtitleFile, isCueProperlyTranslated } from '../lib/subtitleParser';
 import { UILanguage } from '../lib/i18n';
 import { TONE_OPTIONS } from '../constants';
 
@@ -247,6 +247,89 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
     keyTested?: string;
   } | null>(null);
   const [keySaveMode, setKeySaveMode] = useState<'append' | 'replace'>('append');
+
+  // Audit English cues state
+  const [isAuditing, setIsAuditing] = useState(false);
+
+  // In-Place Subtitle Viewer & Editor Modal State
+  const [viewingProject, setViewingProject] = useState<ServerProjectItem | null>(null);
+  const [viewingProjectFolderName, setViewingProjectFolderName] = useState('');
+  const [editedCues, setEditedCues] = useState<SubtitleItem[]>([]);
+  const [cuesFilter, setCuesFilter] = useState<'all' | 'translated' | 'untranslated'>('all');
+  const [cuesSearch, setCuesSearch] = useState('');
+  const [isSavingProjectItems, setIsSavingProjectItems] = useState(false);
+
+  const handleOpenViewingProjectModal = (proj: ServerProjectItem, folderName?: string) => {
+    setViewingProject(proj);
+    setViewingProjectFolderName(folderName || selectedFolder?.name || '');
+    setEditedCues(JSON.parse(JSON.stringify(proj.items || [])));
+    setCuesFilter('all');
+    setCuesSearch('');
+  };
+
+  const handleSaveViewingProjectChanges = async () => {
+    if (!viewingProject) return;
+    setIsSavingProjectItems(true);
+    try {
+      const res = await fetch(`/api/projects/${viewingProject.id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ items: editedCues }),
+      });
+      const data = await res.json();
+      if (data.success && data.project) {
+        setViewingProject(data.project);
+        setEditedCues(JSON.parse(JSON.stringify(data.project.items || [])));
+        onShowToast('تغییرات زیرنویس با موفقیت در دیتابیس سرور ذخیره شد.', 'success');
+        setProjects((prev) => prev.map((p) => (p.id === data.project.id ? data.project : p)));
+        setAllProjects((prev) => prev.map((p) => (p.id === data.project.id ? { ...data.project, folderName: p.folderName } : p)));
+        fetchFolders();
+      } else {
+        onShowToast(data.error || 'خطا در ذخیره تغییرات', 'error');
+      }
+    } catch {
+      onShowToast('خطا در ذخیره در سرور', 'error');
+    } finally {
+      setIsSavingProjectItems(false);
+    }
+  };
+
+  const handleAuditAndFixEnglish = async () => {
+    setIsAuditing(true);
+    try {
+      const res = await fetch('/api/projects/audit-and-fix', { method: 'POST' });
+      const data = await res.json();
+      if (data.success) {
+        onShowToast(data.message, data.totalFixedCues > 0 ? 'warning' : 'success');
+        fetchFolders();
+        if (selectedFolderId) fetchProjects(selectedFolderId);
+        if (activeView === 'all_files') fetchAllProjects();
+      } else {
+        onShowToast(data.error || 'خطا در بررسی فایل‌ها', 'error');
+      }
+    } catch {
+      onShowToast('خطا در ارتباط با سرور', 'error');
+    } finally {
+      setIsAuditing(false);
+    }
+  };
+
+  const handleSetConcurrency = async (val: number) => {
+    try {
+      const res = await fetch('/api/server/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ maxConcurrentProjects: val }),
+      });
+      const data = await res.json();
+      if (data.success && data.config) {
+        setServerConfig(data.config);
+        onShowToast(`تعداد ترجمه همزمان به ${val} فایل با کلیدهای مجزا تغییر یافت.`, 'success');
+      }
+    } catch {
+      onShowToast('خطا در به‌روزرسانی تنظیمات سرور', 'error');
+    }
+  };
 
   // Upload state
   const [isUploading, setIsUploading] = useState(false);
@@ -1240,6 +1323,22 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
             <span>بازیابی (Restore)</span>
           </button>
 
+          {/* Audit English Lines Button */}
+          <button
+            type="button"
+            onClick={handleAuditAndFixEnglish}
+            disabled={isAuditing}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold bg-emerald-500/20 text-emerald-300 hover:bg-emerald-500/30 border border-emerald-500/30 transition-colors shadow-xs"
+            title="بررسی دقیق تمام زیرنویس‌ها برای یافتن هرگونه سطر انگلیسی باقی‌مانده و ترجمه مجدد ۱۰۰٪ فارسی آن‌ها"
+          >
+            {isAuditing ? (
+              <Loader2 className="w-3.5 h-3.5 animate-spin text-emerald-400" />
+            ) : (
+              <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
+            )}
+            <span>پاکسازی و رفع سطور انگلیسی</span>
+          </button>
+
           {/* Key Pool & Test Button */}
           <button
             type="button"
@@ -1253,6 +1352,35 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
             <Key className="w-3.5 h-3.5 text-amber-400" />
             <span>استخر کلیدها ({serverKeysCount} فعال)</span>
           </button>
+        </div>
+      </div>
+
+      {/* Quick Concurrency Control Bar (سرعت ترجمه و تعداد پردازش همزمان) */}
+      <div className="w-full bg-slate-900/60 border border-slate-800 rounded-xl px-4 py-2.5 flex items-center justify-between gap-3 flex-wrap text-xs">
+        <div className="flex items-center gap-2 text-slate-300">
+          <Sliders className="w-3.5 h-3.5 text-indigo-400" />
+          <span className="font-semibold text-slate-200">تعداد ترجمه همزمان فایل‌ها (با کلیدهای اختصاصی مجزا):</span>
+          <span className="text-[11px] text-slate-400 hidden sm:inline">(هر فایل موازی یک کلید از استخر را اختصاص می‌دهد)</span>
+        </div>
+        <div className="flex items-center gap-1.5 flex-wrap">
+          {[2, 4, 6, 8, 10, 12, 16].map((num) => {
+            const isSelected = (serverConfig.maxConcurrentProjects || 4) === num;
+            return (
+              <button
+                key={num}
+                type="button"
+                onClick={() => handleSetConcurrency(num)}
+                className={`px-2.5 py-1 rounded-lg font-mono font-bold text-xs transition-all ${
+                  isSelected
+                    ? 'bg-indigo-600 text-white shadow-xs border border-indigo-400'
+                    : 'bg-slate-800 text-slate-400 hover:text-white hover:bg-slate-700 border border-slate-700/60'
+                }`}
+                title={`تنظیم ${num} فایل همزمان`}
+              >
+                {num} فایل
+              </button>
+            );
+          })}
         </div>
       </div>
 
@@ -1971,21 +2099,12 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
                               <span>VTT</span>
                             </a>
 
-                            {/* Open in Full Editor */}
+                            {/* View & Edit Subtitles In-Place Modal */}
                             <button
                               type="button"
-                              onClick={() =>
-                                onOpenProjectInEditor({
-                                  id: proj.id,
-                                  name: proj.name,
-                                  folderName: selectedFolder.name,
-                                  items: proj.items,
-                                  format: proj.format as SubtitleFormat,
-                                  rawHeader: proj.rawHeader,
-                                })
-                              }
+                              onClick={() => handleOpenViewingProjectModal(proj, selectedFolder.name)}
                               className="p-1.5 text-slate-300 hover:text-indigo-400 bg-slate-800 hover:bg-slate-700 rounded-lg transition-colors"
-                              title="مشاهده و ویرایش در ادیتور سریع"
+                              title="مشاهده، بررسی و ویرایش دستی سطرها"
                             >
                               <Eye className="w-3.5 h-3.5" />
                             </button>
@@ -2164,21 +2283,12 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
                             <span>VTT</span>
                           </a>
 
-                          {/* Open In Editor */}
+                          {/* View & Edit Subtitles In-Place Modal */}
                           <button
                             type="button"
-                            onClick={() =>
-                              onOpenProjectInEditor({
-                                id: proj.id,
-                                name: proj.name,
-                                folderName: proj.folderName,
-                                items: proj.items,
-                                format: proj.format as SubtitleFormat,
-                                rawHeader: proj.rawHeader,
-                              })
-                            }
+                            onClick={() => handleOpenViewingProjectModal(proj, proj.folderName)}
                             className="p-1.5 text-slate-300 hover:text-indigo-400 bg-slate-800 hover:bg-slate-700 rounded-lg transition-colors"
-                            title="مشاهده در ادیتور"
+                            title="مشاهده، بررسی و ویرایش دستی سطرها"
                           >
                             <Eye className="w-3.5 h-3.5" />
                           </button>
@@ -3196,6 +3306,270 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
                   <span>بازیابی دیتابیس</span>
                 )}
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal: In-Place Subtitle Inspector & Manual Editor */}
+      {viewingProject && (
+        <div className="fixed inset-0 z-50 bg-black/85 backdrop-blur-sm flex items-center justify-center p-3 sm:p-5">
+          <div className="bg-slate-900 border border-slate-800 rounded-2xl w-full max-w-5xl h-[92vh] shadow-2xl flex flex-col overflow-hidden animate-scale-up">
+            {/* Modal Header */}
+            <div className="p-4 sm:p-5 border-b border-slate-800 bg-slate-950/80 flex items-center justify-between gap-4 flex-wrap">
+              <div className="flex items-center gap-3 overflow-hidden">
+                <div className="w-10 h-10 rounded-xl bg-indigo-600/20 border border-indigo-500/30 flex items-center justify-center text-indigo-400 shrink-0">
+                  <FileText className="w-5 h-5" />
+                </div>
+                <div className="flex flex-col gap-1">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <h3 className="text-sm sm:text-base font-bold text-white truncate max-w-md">
+                      {viewingProject.name}
+                    </h3>
+                    {viewingProjectFolderName && (
+                      <span className="text-[11px] font-bold px-2 py-0.5 rounded-md bg-indigo-500/20 text-indigo-300 border border-indigo-500/30 flex items-center gap-1">
+                        <Folder className="w-3 h-3 text-indigo-400" />
+                        <span>{viewingProjectFolderName}</span>
+                      </span>
+                    )}
+                    <span className="uppercase text-[10px] font-bold px-1.5 py-0.5 rounded bg-slate-800 text-slate-300">
+                      {viewingProject.format}
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-3 text-xs text-slate-400">
+                    <span className="text-emerald-400 font-semibold font-mono">
+                      {editedCues.filter(c => isCueProperlyTranslated(c.originalText, c.translatedText, 'fa')).length} از {editedCues.length} سطر فارسی ترجمه شده
+                    </span>
+                    <span>•</span>
+                    <span className="text-amber-400 font-mono">
+                      {editedCues.filter(c => !isCueProperlyTranslated(c.originalText, c.translatedText, 'fa')).length} سطر نیازمند ترجمه
+                    </span>
+                  </div>
+                </div>
+              </div>
+
+              {/* Header Action Buttons */}
+              <div className="flex items-center gap-2 shrink-0 flex-wrap">
+                <button
+                  type="button"
+                  onClick={() => {
+                    const targetProj = viewingProject;
+                    setViewingProject(null);
+                    onOpenProjectInEditor({
+                      id: targetProj.id,
+                      name: targetProj.name,
+                      folderName: viewingProjectFolderName,
+                      items: editedCues,
+                      format: targetProj.format as SubtitleFormat,
+                      rawHeader: targetProj.rawHeader,
+                    });
+                  }}
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold bg-slate-800 text-slate-200 hover:text-white hover:bg-slate-700 border border-slate-700 transition-colors shadow-xs"
+                  title="انتقال سطرها به ادیتور پیشرفته سینمایی با خط زمان و پخش‌کننده ویدیو"
+                >
+                  <ExternalLink className="w-3.5 h-3.5 text-indigo-400" />
+                  <span>ادیتور پیشرفته سینما</span>
+                </button>
+
+                <a
+                  href={`/api/projects/${viewingProject.id}/export/srt`}
+                  download
+                  className="flex items-center gap-1 px-2.5 py-1.5 rounded-xl text-xs font-semibold bg-amber-500/15 text-amber-300 hover:bg-amber-500/25 border border-amber-500/30 transition-colors"
+                >
+                  <Download className="w-3.5 h-3.5" />
+                  <span>SRT</span>
+                </a>
+
+                <a
+                  href={`/api/projects/${viewingProject.id}/export/vtt`}
+                  download
+                  className="flex items-center gap-1 px-2.5 py-1.5 rounded-xl text-xs font-semibold bg-emerald-500/15 text-emerald-300 hover:bg-emerald-500/25 border border-emerald-500/30 transition-colors"
+                >
+                  <Download className="w-3.5 h-3.5" />
+                  <span>VTT</span>
+                </a>
+
+                <button
+                  type="button"
+                  disabled={isSavingProjectItems}
+                  onClick={handleSaveViewingProjectChanges}
+                  className="flex items-center gap-1.5 px-4 py-1.5 rounded-xl text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-500 shadow-md shadow-indigo-600/30 transition-colors disabled:opacity-50 cursor-pointer"
+                >
+                  {isSavingProjectItems ? (
+                    <>
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      <span>در حال ذخیره...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Check className="w-3.5 h-3.5" />
+                      <span>ذخیره تغییرات در دیتابیس</span>
+                    </>
+                  )}
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => setViewingProject(null)}
+                  className="p-1.5 text-slate-400 hover:text-white bg-slate-800 rounded-xl hover:bg-slate-700 transition-colors"
+                  title="بستن"
+                >
+                  ✕
+                </button>
+              </div>
+            </div>
+
+            {/* Sub-toolbar: Search & Filter Tabs */}
+            <div className="p-3 bg-slate-950 border-b border-slate-800 flex items-center justify-between gap-3 flex-wrap">
+              <div className="flex items-center gap-1.5 bg-slate-900 p-1 rounded-xl border border-slate-800">
+                <button
+                  type="button"
+                  onClick={() => setCuesFilter('all')}
+                  className={`px-3 py-1 rounded-lg text-xs font-bold transition-all ${
+                    cuesFilter === 'all' ? 'bg-indigo-600 text-white shadow-xs' : 'text-slate-400 hover:text-white'
+                  }`}
+                >
+                  همه سطرها ({editedCues.length})
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setCuesFilter('translated')}
+                  className={`px-3 py-1 rounded-lg text-xs font-bold transition-all ${
+                    cuesFilter === 'translated' ? 'bg-emerald-600 text-white shadow-xs' : 'text-slate-400 hover:text-emerald-300'
+                  }`}
+                >
+                  فارسی / تکمیل ({editedCues.filter(c => isCueProperlyTranslated(c.originalText, c.translatedText, 'fa')).length})
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setCuesFilter('untranslated')}
+                  className={`px-3 py-1 rounded-lg text-xs font-bold transition-all ${
+                    cuesFilter === 'untranslated' ? 'bg-amber-600 text-white shadow-xs' : 'text-slate-400 hover:text-amber-300'
+                  }`}
+                >
+                  انگلیسی / ناقص ({editedCues.filter(c => !isCueProperlyTranslated(c.originalText, c.translatedText, 'fa')).length})
+                </button>
+              </div>
+
+              {/* Search in Cues */}
+              <div className="relative w-full sm:w-72">
+                <Search className="w-3.5 h-3.5 text-slate-400 absolute right-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+                <input
+                  type="text"
+                  value={cuesSearch}
+                  onChange={(e) => setCuesSearch(e.target.value)}
+                  placeholder="جستجو در متن انگلیسی یا ترجمه..."
+                  className="w-full bg-slate-900 border border-slate-800 rounded-xl pr-8 pl-3 py-1.5 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-indigo-500"
+                />
+              </div>
+            </div>
+
+            {/* Cues List */}
+            <div className="flex-1 overflow-y-auto p-4 flex flex-col gap-3 divide-y divide-slate-800/40">
+              {editedCues
+                .filter((cue) => {
+                  const isTranslated = isCueProperlyTranslated(cue.originalText, cue.translatedText, 'fa');
+                  if (cuesFilter === 'translated' && !isTranslated) return false;
+                  if (cuesFilter === 'untranslated' && isTranslated) return false;
+                  if (cuesSearch.trim()) {
+                    const q = cuesSearch.toLowerCase();
+                    return cue.originalText.toLowerCase().includes(q) || (cue.translatedText || '').toLowerCase().includes(q);
+                  }
+                  return true;
+                })
+                .map((cue) => {
+                  const isProper = isCueProperlyTranslated(cue.originalText, cue.translatedText, 'fa');
+                  return (
+                    <div
+                      key={cue.id}
+                      className={`pt-3 first:pt-0 flex flex-col gap-2 rounded-xl p-3 transition-colors ${
+                        !isProper ? 'bg-amber-500/5 border border-amber-500/20' : 'bg-slate-900/40 border border-slate-800/60'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between gap-2 text-[11px] font-mono text-slate-400">
+                        <div className="flex items-center gap-2">
+                          <span className="w-6 h-6 rounded-md bg-slate-800 text-slate-300 flex items-center justify-center font-bold text-[11px]">
+                            {cue.id}
+                          </span>
+                          <span className="text-slate-300 dir-ltr">{cue.startTime} ➔ {cue.endTime}</span>
+                        </div>
+                        {!isProper ? (
+                          <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/30 flex items-center gap-1 font-sans">
+                            <AlertCircle className="w-3 h-3 text-amber-400" />
+                            <span>نیازمند ترجمه فارسی / انگلیسی باقی مانده</span>
+                          </span>
+                        ) : (
+                          <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 flex items-center gap-1 font-sans">
+                            <CheckCircle2 className="w-3 h-3 text-emerald-400" />
+                            <span>فارسی</span>
+                          </span>
+                        )}
+                      </div>
+
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                        {/* Original English Text */}
+                        <div className="bg-slate-950 border border-slate-800 rounded-xl p-2.5 flex flex-col justify-between gap-1 text-xs text-slate-300 direction-ltr font-sans">
+                          <div className="whitespace-pre-wrap select-text">{cue.originalText}</div>
+                          <div className="flex items-center justify-end text-[10px] text-slate-500 font-mono">
+                            انگلیسی اصلی
+                          </div>
+                        </div>
+
+                        {/* Editable Persian Translated Text */}
+                        <div className="flex flex-col gap-1">
+                          <textarea
+                            rows={Math.max(2, (cue.translatedText || '').split('\n').length)}
+                            value={cue.translatedText || ''}
+                            placeholder="متن ترجمه فارسی را وارد کنید..."
+                            onChange={(e) => {
+                              const newVal = e.target.value;
+                              setEditedCues((prev) =>
+                                prev.map((c) => (c.id === cue.id ? { ...c, translatedText: newVal } : c))
+                              );
+                            }}
+                            className={`w-full bg-slate-950 border rounded-xl p-2.5 text-xs text-white placeholder-slate-600 focus:outline-none focus:ring-1 focus:ring-indigo-500 direction-rtl font-sans transition-colors resize-y ${
+                              !isProper ? 'border-amber-500/50 focus:border-amber-400' : 'border-slate-800 focus:border-indigo-500'
+                            }`}
+                          />
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+            </div>
+
+            {/* Modal Footer */}
+            <div className="p-3 sm:p-4 bg-slate-950 border-t border-slate-800 flex items-center justify-between gap-3 flex-wrap text-xs">
+              <span className="text-slate-400">
+                هر ویرایشی انجام دهید با کلیک روی دکمه ذخیره، مستقیماً در دیتابیس سرور ثبت می‌شود.
+              </span>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setViewingProject(null)}
+                  className="px-4 py-2 rounded-xl text-xs font-semibold text-slate-400 hover:text-white bg-slate-800 hover:bg-slate-700 transition-colors"
+                >
+                  بستن
+                </button>
+                <button
+                  type="button"
+                  disabled={isSavingProjectItems}
+                  onClick={handleSaveViewingProjectChanges}
+                  className="px-5 py-2 rounded-xl text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-500 shadow-md shadow-indigo-600/30 transition-colors disabled:opacity-50 cursor-pointer flex items-center gap-1.5"
+                >
+                  {isSavingProjectItems ? (
+                    <>
+                      <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      <span>در حال ذخیره در سرور...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Check className="w-3.5 h-3.5" />
+                      <span>ذخیره تغییرات زیرنویس</span>
+                    </>
+                  )}
+                </button>
+              </div>
             </div>
           </div>
         </div>

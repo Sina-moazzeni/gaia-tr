@@ -11,12 +11,15 @@ import {
   leaseAvailableKey,
   markKeyAsExhausted,
   isKeyExhausted,
+  resetKeyCooldown,
+  getExhaustedKeysList,
   saveDatabaseSync, 
   getServerConfig,
   resetProjectTranslation,
   recordKeyUsage,
   ServerSubtitleProject 
 } from './database';
+import { isCueProperlyTranslated } from '../lib/subtitleParser';
 
 // Primary & Fallback Models hierarchy:
 // EXCLUSIVELY Gemini 3.5 Flash Lite as primary, and Gemini 3.1 Flash Lite if server 503 load occurs.
@@ -123,7 +126,7 @@ export function getWorkerStatus(): WorkerStatus {
   return {
     isRunning: Boolean(workerInterval),
     activeProjectCount: translatingProjects.length,
-    maxConcurrentProjects: config.maxConcurrentProjects || 2,
+    maxConcurrentProjects: config.maxConcurrentProjects || 4,
     activeProjects: activeProjectsSummaries,
     activeProjectId: firstActive ? firstActive.id : (queuedProject ? queuedProject.id : null),
     activeProjectName: firstActive ? firstActive.name : (queuedProject ? queuedProject.name : null),
@@ -293,8 +296,9 @@ ${previousContextStr}
 ۱. پیوستگی و درک عمیق موضوع: با توجه به موضوع کل ویدیو و سیر دیالوگ‌ها، مفاهیم علمی، کیهانی، روایی، فلسفی و تخصصی را با درک زمینه سخن گوینده، به روان‌ترین و دقیق‌ترین فارسی برگردانید.
 ۲. تطابق دقیق ۱ به ۱ شناسه‌ها: هر شناسه ورودی (id) باید دقیقاً یک شناسه در خروجی داشته باشد. ادغام چند سطر در یک سطر یا حذف حتی یک سطر اکیداً ممنوع است.
 ۳. تایم‌بندی و ترتیب سطرها کاملاً ثابت است و هرگز تغییر نمی‌کند؛ شما فقط متن ترجمه را در فیلد text قرار می‌دهید.
-۴. تگ‌های زیرنویس نظیر <i>, </i>, <b>, </b>, {\\an8} و شکست خطوط \\n دقیقاً در جای مناسب خود حفظ شوند.
-۵. خروجی فقط و فقط یک شیء JSON معتبر به فرمت زیر باشد (بدون هیچ کلمه اضافی در ابتدا یا انتها):
+۴. تگ‌های زیرنویس نظیر <i>, </i>, <b>, </b>, {\an8} و شکست خطوط \n دقیقاً در جای مناسب خود حفظ شوند.
+۵. ترجمه ۱۰۰٪ اجباری به فارسی: تمام جملات انگلیسی باید به فارسی شیوا ترجمه شوند. رها کردن جملات به زبان انگلیسی، کپی کردن متن مبدأ بدون ترجمه یا بازگرداندن متن انگلیسی اکیداً ممنوع است.
+۶. خروجی فقط و فقط یک شیء JSON معتبر به فرمت زیر باشد (بدون هیچ کلمه اضافی در ابتدا یا انتها):
 {"translations":[{"id":1,"text":"متن ترجمه شده روان و باکیفیت"}]}`;
 
   const userContent = JSON.stringify(items);
@@ -413,10 +417,14 @@ export async function translateBatchWithDedicatedKey(
             } catch {}
           }
 
-          const finalTranslations = items.map((it) => ({
-            id: it.id,
-            text: returnedMap.get(it.id) || it.text,
-          }));
+          const finalTranslations = items.map((it) => {
+            const rawTranslated = returnedMap.get(it.id);
+            const isValid = rawTranslated && isCueProperlyTranslated(it.text, rawTranslated, targetLanguage);
+            return {
+              id: it.id,
+              text: isValid ? rawTranslated.trim() : '',
+            };
+          });
 
           return {
             translations: finalTranslations,
@@ -487,18 +495,21 @@ async function processSingleProjectBatch(projectId: string): Promise<void> {
   const project = getProjectById(projectId);
   if (!project) return;
 
-  // Find cues in this project that still need translation
-  const untranslatedCues = project.items.filter((item) => !item.translatedText || !item.translatedText.trim());
+  // Find cues in this project that still need translation (either empty or left in English)
+  const untranslatedCues = project.items.filter(
+    (item) => !isCueProperlyTranslated(item.originalText, item.translatedText, project.targetLanguage)
+  );
 
   if (untranslatedCues.length === 0) {
     project.status = 'completed';
     project.completedAt = new Date().toISOString();
     project.translatedCues = project.totalCues;
+    project.failedCueIds = [];
     project.errorMessage = undefined;
     project.lastError = undefined;
     saveDatabaseSync();
-    lastWorkerStatusMessage = `ترجمه فایل "${project.name}" با موفقیت ۱۰۰٪ پایان یافت.`;
-    console.log(`[BackgroundWorker] Project ${project.name} (${project.id}) fully completed!`);
+    lastWorkerStatusMessage = `ترجمه فایل "${project.name}" با موفقیت ۱۰۰٪ و بدون سطر انگلیسی تأیید شد.`;
+    console.log(`[BackgroundWorker] Project ${project.name} (${project.id}) fully completed and verified!`);
     return;
   }
 
@@ -565,7 +576,10 @@ async function processSingleProjectBatch(projectId: string): Promise<void> {
 
     for (const item of project.items) {
       if (resultMap.has(item.id)) {
-        item.translatedText = resultMap.get(item.id)!;
+        const candidate = resultMap.get(item.id)!;
+        if (isCueProperlyTranslated(item.originalText, candidate, project.targetLanguage)) {
+          item.translatedText = candidate;
+        }
       }
     }
 
@@ -573,8 +587,11 @@ async function processSingleProjectBatch(projectId: string): Promise<void> {
     consecutiveAllExhaustedRounds = 0;
     nextBackoffRetryTimestamp = 0;
 
-    // Update counts & token stats
-    project.translatedCues = project.items.filter((i) => Boolean(i.translatedText && i.translatedText.trim())).length;
+    // Update counts & token stats using strict Persian translation verification
+    project.translatedCues = project.items.filter((i) =>
+      isCueProperlyTranslated(i.originalText, i.translatedText, project.targetLanguage)
+    ).length;
+
     project.tokenUsage.promptTokens += result.tokens.prompt;
     project.tokenUsage.candidatesTokens += result.tokens.candidates;
     project.tokenUsage.totalTokens += result.tokens.total;
@@ -588,13 +605,20 @@ async function processSingleProjectBatch(projectId: string): Promise<void> {
     db.stats.totalTranslations++;
     recordKeyUsage(result.keyUsed || leasedKey, result.tokens);
 
-    if (project.translatedCues >= project.totalCues) {
+    // Verify if any cues are still untranslated or in English
+    const remainingUntranslated = project.items.filter(
+      (i) => !isCueProperlyTranslated(i.originalText, i.translatedText, project.targetLanguage)
+    );
+
+    if (remainingUntranslated.length === 0) {
       project.status = 'completed';
       project.completedAt = new Date().toISOString();
-      lastWorkerStatusMessage = `ترجمه فایل "${project.name}" با موفقیت تکمیل شد.`;
+      project.translatedCues = project.totalCues;
+      project.failedCueIds = [];
+      lastWorkerStatusMessage = `ترجمه فایل "${project.name}" با موفقیت ۱۰۰٪ و بدون سطر انگلیسی تکمیل شد.`;
     } else {
       const pct = Math.round((project.translatedCues / project.totalCues) * 100);
-      lastWorkerStatusMessage = `فایل "${project.name}": ترجمه ${project.translatedCues} از ${project.totalCues} سطر (${pct}%)`;
+      lastWorkerStatusMessage = `فایل "${project.name}": ترجمه معتبر ${project.translatedCues} از ${project.totalCues} سطر (${pct}%)`;
     }
 
     // Save progress to persistent JSON disk storage immediately!
@@ -622,6 +646,39 @@ async function processSingleProjectBatch(projectId: string): Promise<void> {
   }
 }
 
+let lastKeyProbeTime = 0;
+const KEY_PROBE_INTERVAL_MS = 25_000;
+
+/**
+ * Background probe for exhausted keys:
+ * Tests exhausted keys in the background with a minimal request.
+ * If Google accepts the key, we unfreeze it immediately without waiting for cooldown!
+ */
+async function probeExhaustedKeysInBackground(): Promise<void> {
+  const now = Date.now();
+  if (now - lastKeyProbeTime < KEY_PROBE_INTERVAL_MS) return;
+  lastKeyProbeTime = now;
+
+  const exhaustedKeys = getExhaustedKeysList();
+  if (exhaustedKeys.length === 0) return;
+
+  const testKey = exhaustedKeys[0];
+  try {
+    const probeAi = createGenAI(testKey);
+    await probeAi.models.generateContent({
+      model: activeTranslationModel,
+      contents: 'سلام',
+      config: { maxOutputTokens: 2 },
+    });
+    // Succeeded! Reset cooldown for this key immediately
+    resetKeyCooldown(testKey);
+    resetWorkerExhaustionBackoff();
+    console.log(`[BackgroundWorker] Key ${testKey.slice(0, 6)}... passed background health probe and is restored!`);
+  } catch {
+    // Key still in quota lock
+  }
+}
+
 /**
  * Main Worker Tick: Dispatches parallel project jobs up to maxConcurrentProjects
  * with Patient Progressive Backoff when all keys hit exhaustion limits.
@@ -633,6 +690,9 @@ async function processTick(): Promise<void> {
 
   // If no keys configured, do not dispatch
   if (allKeys.length === 0) return;
+
+  // Run lightweight background probe for exhausted keys
+  void probeExhaustedKeysInBackground();
 
   const now = Date.now();
 
@@ -695,7 +755,7 @@ async function processTick(): Promise<void> {
     return;
   }
 
-  const maxWorkers = Math.max(1, Math.min(config.maxConcurrentProjects || 2, Math.max(1, allKeys.length)));
+  const maxWorkers = Math.max(1, Math.min(config.maxConcurrentProjects || 4, Math.max(1, allKeys.length)));
 
   // Check how many worker slots are open
   const availableSlots = maxWorkers - activeProjectJobIds.size;

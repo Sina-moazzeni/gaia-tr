@@ -46,6 +46,43 @@ export function validateAndSanitizeTimecodes(startSec: number, endSec: number): 
 }
 
 /**
+ * Verifies whether a subtitle cue is genuinely translated into the target language,
+ * and not still in English or empty.
+ */
+export function isCueProperlyTranslated(
+  originalText?: string,
+  translatedText?: string,
+  targetLanguage: string = 'fa'
+): boolean {
+  if (!translatedText || !translatedText.trim()) return false;
+  const cleanTrans = translatedText.trim();
+  const cleanOrig = (originalText || '').trim();
+
+  // If original has no letters (e.g. only numbers, punctuation, timestamps)
+  const hasLatinLetters = /[a-zA-Z]/.test(cleanOrig);
+  if (!hasLatinLetters) {
+    return cleanTrans.length > 0;
+  }
+
+  // If target is Persian, Arabic, or Urdu:
+  if (['fa', 'ar', 'ur'].includes(targetLanguage)) {
+    const hasPersianOrArabic = /[\u0600-\u06FF\uFB50-\uFDFF\uFE70-\uFEFF]/.test(cleanTrans);
+    if (!hasPersianOrArabic) {
+      // It has Latin letters in source, but zero Persian/Arabic characters in translation!
+      // This is still in English!
+      return false;
+    }
+  }
+
+  // If translation is identical to original and original is more than 3 chars
+  if (cleanOrig.length > 3 && cleanTrans.toLowerCase() === cleanOrig.toLowerCase()) {
+    return false;
+  }
+
+  return true;
+}
+
+/**
  * Format seconds to SRT format: "00:01:20,500"
  * Uses mathematical total millisecond rollover so ms never equals 1000 and s never equals 60.
  */

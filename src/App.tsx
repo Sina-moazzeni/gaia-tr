@@ -2398,15 +2398,29 @@ export default function App() {
     format: SubtitleFormat;
     rawHeader?: string;
   }) => {
-    setFileName(project.name);
-    setFileSize(0);
-    setItems(project.items);
-    setSourceFormat(project.format);
-    setTargetFormat(project.format);
-    setRawHeader(project.rawHeader);
-    setMode('cinema');
+    // 1. Prepare session data for cinema mode
+    const cinemaSession: ModeSessionState = {
+      ...(sessionsRef.current.cinema || createDefaultSession('cinema')),
+      fileName: project.name,
+      fileSize: 0,
+      items: project.items || [],
+      sourceFormat: project.format || 'srt',
+      targetFormat: project.format || 'srt',
+      rawHeader: project.rawHeader,
+      targetLanguage: 'fa',
+      isTranslating: false,
+      isPaused: false,
+    };
+    sessionsRef.current.cinema = cinemaSession;
+    saveSessionToDb('cinema', cinemaSession);
+
+    // 2. Switch mode state directly and apply
+    setModeState('cinema');
+    localStorage.setItem('gemini_app_mode', 'cinema');
+    applySessionState(cinemaSession);
+
     const folderInfo = project.folderName ? ` (از پوشه: ${project.folderName})` : '';
-    showToast(`زیرنویس "${project.name}"${folderInfo} در ادیتور سینمایی بارگذاری شد.`, 'success');
+    showToast(`زیرنویس "${project.name}"${folderInfo} با موفقیت در ادیتور پیشرفته سینمایی بارگذاری شد.`, 'success');
   };
 
   return (
