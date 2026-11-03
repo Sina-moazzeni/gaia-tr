@@ -1,0 +1,341 @@
+/**
+ * Types for Universal Subtitle & Game Localization Translator
+ */
+
+export type AppMode = 'cinema' | 'game' | 'folders';
+
+export type TranslationMethod = 'batch' | 'stream';
+
+export type AIProvider = 
+  | 'gemini' 
+  | 'openai' 
+  | 'deepseek' 
+  | 'groq' 
+  | 'claude' 
+  | 'openrouter' 
+  | 'mistral' 
+  | 'ollama' 
+  | 'custom';
+
+export type CustomProviderErrorType =
+  | 'timeout'
+  | 'rate_limit'
+  | 'auth_failure'
+  | 'model_not_found'
+  | 'endpoint_not_found'
+  | 'truncated_response'
+  | 'malformed_json'
+  | 'missing_translations'
+  | 'response_too_large'
+  | 'request_too_large'
+  | 'cancelled'
+  | 'network_error'
+  | 'ssrf_blocked'
+  | 'provider_error'
+  | 'service_unavailable'
+  | 'gateway_timeout'
+  | 'invalid_config';
+
+export interface CustomProviderTimingTelemetry {
+  request_start: number;
+  provider_fetch_start?: number;
+  provider_headers_received?: number;
+  provider_body_start?: number;
+  provider_body_complete?: number;
+  provider_json_parsed?: number;
+  response_sent?: number;
+  request_complete?: number;
+  elapsed_ms?: number;
+  status?: number;
+  response_bytes?: number;
+  provider_host?: string;
+  model?: string;
+  batch_size?: number;
+  retry_number?: number;
+  timeout_reason?: string;
+}
+
+export interface CustomProviderConfig {
+  provider?: AIProvider;
+  name?: string;
+  baseUrl: string;
+  apiKey: string;
+  apiKeys?: string[];
+  model: string;
+}
+
+export interface CustomProviderTestResult {
+  success: boolean;
+  error?: string;
+  errorType?: 
+    | 'invalid_key' 
+    | 'auth_failed' 
+    | 'model_not_found' 
+    | 'endpoint_not_found' 
+    | 'rate_limit' 
+    | 'provider_error' 
+    | 'network_error' 
+    | 'invalid_response' 
+    | 'timeout' 
+    | 'invalid_url';
+  latencyMs?: number;
+  modelResponded?: string;
+}
+
+export type AIModelId = 
+  | 'gemini-3.8-flash'
+  | 'gemini-3.7-flash'
+  | 'gemini-3.6-flash'
+  | 'gemini-3.5-flash'
+  | 'gemini-3.1-flash-lite'
+  | 'gemini-3.1-pro-preview'
+  | 'gemini-live-stream'
+  | 'gemini-3.5-transcribe'
+  | 'gemini-3.1-pro'
+  | 'gemini-2.5-pro'
+  | 'gemini-2.5-flash';
+
+export interface AIModelOption {
+  id: AIModelId;
+  name: string;
+  badge: string;
+  badgeColor: string;
+  speed: string;
+  speedFa: string;
+  speedEn: string;
+  speedAr: string;
+  reasoningLevel: 'standard' | 'high' | 'ultra' | 'realtime';
+  descriptionFa: string;
+  descriptionEn: string;
+  descriptionAr: string;
+  isStreaming?: boolean;
+  requiresPaidTier?: boolean;
+  status?: 'stable' | 'preview' | 'deprecated';
+  quality?: string;
+  costTier?: 'ultra_low' | 'standard' | 'paid_premium';
+  recommendedUseCase?: string;
+  displayLabel?: string;
+}
+
+export type SubtitleFormat = 'srt' | 'vtt' | 'ass' | 'ssa' | 'sub';
+export type GameFormat = 'csv' | 'json' | 'txt' | 'xlsx';
+
+export type ToneOption = 
+  | 'cinematic' 
+  | 'conversational' 
+  | 'formal' 
+  | 'humorous' 
+  | 'educational' 
+  | 'documentary'
+  | 'epic' 
+  | 'action'
+  | 'horror'
+  | 'poetic'
+  | 'animation'
+  | 'custom';
+
+export interface ToneInfo {
+  id: ToneOption;
+  labelFa: string;
+  labelEn: string;
+  descriptionFa: string;
+  iconName: string;
+}
+
+export interface LanguageOption {
+  code: string;
+  nameFa: string;
+  nameEn: string;
+  nameAr?: string;
+  flag: string;
+}
+
+export interface SubtitleItem {
+  id: number;
+  startTime: string;  // e.g. "00:01:20,500" or "00:01:20.50"
+  endTime: string;    // e.g. "00:01:24,100"
+  startSeconds: number;
+  endSeconds: number;
+  originalText: string;
+  translatedText: string;
+  styleTags?: string; // ASS/SSA styling or header tags if any
+  cueId?: string;     // FIX (L9): WebVTT cue identifier preserved from the source file
+  isEditing?: boolean;
+  sourceModified?: boolean;
+  gameKey?: string;
+  context?: string;
+  variables?: string[];
+  rawRowData?: Record<string, any>;
+}
+
+export interface GameLocalizationItem {
+  id: number;
+  key?: string;           // Identifier / Key name / ID
+  originalText: string;
+  translatedText: string;
+  context?: string;       // Speaker name, category, or notes
+  variables?: string[];   // Detected code tokens like {player_name}, {0}, %s, $amount, etc.
+  rawRowData?: Record<string, any>; // Underlying row representation for accurate reconstruction
+  isEditing?: boolean;
+  sourceModified?: boolean;
+}
+
+export interface GameColumnMapping {
+  sourceColumn: string;
+  targetColumn: string;
+  keyColumn?: string;
+  contextColumn?: string;
+  hasHeaders: boolean;
+}
+
+export interface VerifyTranslationRequest {
+  items: Array<{ id: number; originalText: string; translatedText: string }>;
+  targetLanguage: string;
+  tone: ToneOption;
+  customPrompt?: string;
+  mode?: AppMode;
+}
+
+export interface VerifyTranslationResponse {
+  reviewedItems: { id: number; translatedText: string; notes?: string }[];
+  lineCountMatch: boolean;
+  refinedCount: number;
+  untranslatedFixedCount: number;
+  error?: string;
+}
+
+export interface BatchTranslateRequest {
+  items: { id: number; text: string; key?: string; context?: string }[];
+  sourceLanguage?: string;
+  targetLanguage: string;
+  tone: ToneOption;
+  customPrompt?: string;
+  mode?: AppMode;
+}
+
+export interface BatchTranslateResponse {
+  translations: { id: number; text: string }[];
+  detectedSourceLanguage?: string;
+  error?: string;
+}
+
+export interface ToastMessage {
+  id: string;
+  type: 'success' | 'error' | 'info' | 'warning';
+  message: string;
+}
+
+export type BilingualOrder = 'original-top' | 'translated-top';
+export type BilingualSeparator = '\n' | ' - ' | ' / ' | ' | ' | ' • ';
+export type BilingualWrap = 'none' | 'parentheses' | 'brackets' | 'curly';
+
+export interface BilingualConfig {
+  enabled: boolean;
+  order: BilingualOrder;
+  separator: BilingualSeparator;
+  wrapSecondary: BilingualWrap;
+  secondaryColor: string; // e.g. '#FFFF00'
+  secondarySizePercent: number; // e.g. 85
+  primaryColor?: string; // e.g. '#FFFFFF'
+}
+
+export type BatchSizeOption = number;
+
+export interface AdvancedSettings {
+  batchSize: BatchSizeOption;
+  skipCodeOnly: boolean;
+  appendRTLMarkers: boolean;
+  rateLimitPacing: boolean;
+  pacingDelaySeconds?: number;
+}
+
+export interface ModeSessionState {
+  fileName: string;
+  fileSize: number;
+  sourceFormat: SubtitleFormat | GameFormat;
+  targetFormat: SubtitleFormat | GameFormat;
+  rawHeader?: string;
+  selectedEncoding: string;
+  detectedEncoding: string;
+  items: SubtitleItem[];
+  gameColumns: string[];
+  gameMapping: GameColumnMapping;
+  gameOriginalStructure: any;
+  sourceLanguage: string;
+  detectedSourceLang: string;
+  targetLanguage: string;
+  selectedTone: ToneOption;
+  customPrompt: string;
+  isTranslating: boolean;
+  isPaused: boolean;
+  currentBatch: number;
+  totalBatches: number;
+  translatedCount: number;
+  activeJobId?: string;
+  lastUploadedBuffer?: { buffer: ArrayBuffer; name: string; size: number } | null;
+}
+
+export interface TokenUsageStats {
+  promptTokens: number;
+  candidatesTokens: number;
+  totalTokens: number;
+  sessionPromptTokens: number;
+  sessionCandidatesTokens: number;
+  sessionTotalTokens: number;
+  contextLimit: number;
+  remainingTokensInContext: number;
+  estimatedTpmRemaining: number;
+}
+
+export interface QueueFileItem {
+  id: string;
+  name: string;
+  size: number;
+  format: SubtitleFormat | GameFormat;
+  targetFormat: SubtitleFormat | GameFormat;
+  buffer: ArrayBuffer;
+  encoding: string;
+  detectedEncoding?: string;
+  rawHeader?: string;
+  items: SubtitleItem[];
+  status: 'pending' | 'translating' | 'completed' | 'error' | 'paused';
+  translatedCount: number;
+  totalCount: number;
+  currentBatch: number;
+  totalBatches: number;
+  error?: string;
+  tokenStats?: {
+    promptTokens: number;
+    candidatesTokens: number;
+    totalTokens: number;
+  };
+  gameColumns?: string[];
+  gameMapping?: GameColumnMapping;
+  gameOriginalStructure?: any;
+  resultBlob?: Blob;
+  completedAt?: number;
+}
+
+export interface BatchHealthStatus {
+  batchIndex: number;
+  status: 'success' | 'failed' | 'retrying' | 'running' | 'pending';
+  cueRange?: string;
+  cuesCount?: number;
+  retryCount?: number;
+  maxRetries?: number;
+  error?: string;
+  durationMs?: number;
+}
+
+export interface FailedTranslationItem {
+  batchIndex: number;
+  cueIndex?: number;
+  cueId?: string | number;
+  originalText?: string;
+  error?: string;
+  timestamp?: string;
+}
+
+
+
+

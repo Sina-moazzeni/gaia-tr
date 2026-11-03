@@ -1,0 +1,1218 @@
+import React, { useState } from 'react';
+import { SubtitleFormat, GameFormat, ToneOption, AppMode, GameColumnMapping, BatchSizeOption, AIModelId, AIProvider, CustomProviderConfig } from '../types';
+import { TONE_OPTIONS, AI_MODELS } from '../constants';
+import { UILanguage, TRANSLATIONS } from '../lib/i18n';
+import { AI_PROVIDERS_CONFIG, ALL_PROVIDERS_LIST, ProviderModelOption } from '../lib/providersConfig';
+import { getProviderKeys, getProviderConfig, saveProviderConfig } from '../lib/apiKeyManager';
+import { SearchableLanguageSelect } from './SearchableLanguageSelect';
+import { ModelGuideModal } from './ModelGuideModal';
+import { 
+  Languages, 
+  Sparkles, 
+  MessageSquareQuote, 
+  FileType, 
+  Film, 
+  MessageSquare, 
+  BookOpen, 
+  Smile, 
+  GraduationCap, 
+  Swords, 
+  Wand2, 
+  ArrowLeftRight,
+  SlidersHorizontal,
+  TableProperties,
+  Gamepad2,
+  FileCode2,
+  Info,
+  Cpu,
+  Server,
+  CheckSquare,
+  Square,
+  ChevronDown,
+  ChevronUp,
+  Zap,
+  Radio,
+  BrainCircuit,
+  Flame,
+  HelpCircle,
+  ShieldAlert,
+  AlertTriangle,
+  Timer,
+  Layers,
+  Gauge,
+  Plus,
+  Minus,
+  Bot,
+  Brain,
+  Globe,
+  Terminal,
+  Key,
+  CheckCircle,
+  Edit3
+} from 'lucide-react';
+
+interface ConfigPanelProps {
+  mode: AppMode;
+  sourceLanguage: string;
+  setSourceLanguage: (lang: string) => void;
+  targetLanguage: string;
+  setTargetLanguage: (lang: string) => void;
+  selectedTone: ToneOption;
+  setSelectedTone: (tone: ToneOption) => void;
+  customPrompt: string;
+  setCustomPrompt: (prompt: string) => void;
+  targetFormat: SubtitleFormat | GameFormat;
+  setTargetFormat: (fmt: any) => void;
+  onStartTranslation: () => void;
+  isTranslating: boolean;
+  itemCount: number;
+  detectedSourceLang?: string;
+  uiLang: UILanguage;
+  onOpenBilingualModal?: () => void;
+  isBilingualActive?: boolean;
+  // Active AI Model selector & guide
+  selectedModel?: AIModelId;
+  setSelectedModel?: (model: AIModelId) => void;
+  // Game mode column mapping props
+  gameColumns?: string[];
+  gameMapping?: GameColumnMapping;
+  setGameMapping?: (mapping: GameColumnMapping) => void;
+  hasGameFile?: boolean;
+  // Advanced Optimization & Localization settings
+  batchSize?: BatchSizeOption;
+  setBatchSize?: (size: BatchSizeOption) => void;
+  skipCodeOnly?: boolean;
+  setSkipCodeOnly?: (skip: boolean) => void;
+  appendRTLMarkers?: boolean;
+  setAppendRTLMarkers?: (append: boolean) => void;
+  rateLimitPacing?: boolean;
+  setRateLimitPacing?: (pacing: boolean) => void;
+  activeProvider?: AIProvider;
+  onProviderChange?: (provider: AIProvider) => void;
+  customProviderConfig?: CustomProviderConfig;
+  onSaveCustomConfig?: (config: CustomProviderConfig) => void;
+  onOpenApiKeyModal?: () => void;
+}
+
+export const ConfigPanel: React.FC<ConfigPanelProps> = ({
+  mode,
+  sourceLanguage,
+  setSourceLanguage,
+  targetLanguage,
+  setTargetLanguage,
+  selectedTone,
+  setSelectedTone,
+  customPrompt,
+  setCustomPrompt,
+  targetFormat,
+  setTargetFormat,
+  onStartTranslation,
+  isTranslating,
+  itemCount,
+  detectedSourceLang,
+  uiLang,
+  onOpenBilingualModal,
+  isBilingualActive = false,
+  selectedModel = 'gemini-3.6-flash',
+  setSelectedModel,
+  gameColumns,
+  gameMapping,
+  setGameMapping,
+  hasGameFile = false,
+  batchSize = 35,
+  setBatchSize,
+  skipCodeOnly = true,
+  setSkipCodeOnly,
+  appendRTLMarkers = true,
+  setAppendRTLMarkers,
+  rateLimitPacing = true,
+  setRateLimitPacing,
+  activeProvider = 'gemini',
+  onProviderChange,
+  customProviderConfig,
+  onSaveCustomConfig,
+  onOpenApiKeyModal,
+}) => {
+  const t = TRANSLATIONS[uiLang];
+  const [showAdvancedSettings, setShowAdvancedSettings] = useState(false);
+  const [isGuideOpen, setIsGuideOpen] = useState(false);
+  const [isCustomModelInputVisible, setIsCustomModelInputVisible] = useState(false);
+  const [customModelDraft, setCustomModelDraft] = useState('');
+
+  const isGameMode = mode === 'game';
+
+  const renderProviderIcon = (iconName: string, className = 'w-3.5 h-3.5') => {
+    switch (iconName) {
+      case 'Sparkles': return <Sparkles className={className} />;
+      case 'Bot': return <Bot className={className} />;
+      case 'Brain': return <Brain className={className} />;
+      case 'Zap': return <Zap className={className} />;
+      case 'Flame': return <Flame className={className} />;
+      case 'Globe': return <Globe className={className} />;
+      case 'Cpu': return <Cpu className={className} />;
+      case 'Terminal': return <Terminal className={className} />;
+      default: return <Server className={className} />;
+    }
+  };
+
+  const safeProvider: AIProvider = (activeProvider as AIProvider) || 'gemini';
+  const currentProviderDef = AI_PROVIDERS_CONFIG[safeProvider] || AI_PROVIDERS_CONFIG.gemini;
+  const currentProviderModels = currentProviderDef.popularModels || [];
+  const currentActiveModel = safeProvider === 'gemini' 
+    ? selectedModel 
+    : (customProviderConfig?.model || currentProviderDef.defaultModel);
+
+  const handleSelectModelForActiveProvider = (modelId: string) => {
+    const clean = modelId.trim();
+    if (!clean) return;
+    if (safeProvider === 'gemini') {
+      if (setSelectedModel) setSelectedModel(clean as AIModelId);
+    } else {
+      saveProviderConfig(safeProvider, { model: clean });
+      if (onSaveCustomConfig) {
+        const updatedCfg = getProviderConfig(safeProvider);
+        onSaveCustomConfig(updatedCfg);
+      }
+    }
+  };
+
+  const handleSwitchProvider = (providerId: AIProvider) => {
+    if (onProviderChange) {
+      onProviderChange(providerId);
+    }
+    const cfg = getProviderConfig(providerId);
+    if (onSaveCustomConfig) {
+      onSaveCustomConfig(cfg);
+    }
+  };
+
+  const getModelIcon = (id?: string) => {
+    switch (id) {
+      case 'gemini-live-stream':
+        return <Radio className="w-4 h-4 text-rose-500 animate-pulse" />;
+      case 'gemini-3.1-pro-preview':
+      case 'gemini-3.1-pro':
+      case 'gemini-2.5-pro':
+        return <BrainCircuit className="w-4 h-4 text-purple-500" />;
+      case 'gemini-3.8-flash':
+        return <Sparkles className="w-4 h-4 text-emerald-500" />;
+      case 'gemini-3.7-flash':
+        return <Zap className="w-4 h-4 text-teal-500" />;
+      case 'gemini-3.1-flash-lite':
+        return <Gauge className="w-4 h-4 text-amber-500" />;
+      case 'gemini-3.5-flash':
+        return <Flame className="w-4 h-4 text-cyan-500" />;
+      case 'gemini-3.6-flash':
+      default:
+        return <Zap className="w-4 h-4 text-blue-500" />;
+    }
+  };
+
+
+  const getToneIcon = (iconName: string) => {
+    switch (iconName) {
+      case 'Film': return <Film className="w-4 h-4" />;
+      case 'MessageSquare': return <MessageSquare className="w-4 h-4" />;
+      case 'BookOpen': return <BookOpen className="w-4 h-4" />;
+      case 'Smile': return <Smile className="w-4 h-4" />;
+      case 'GraduationCap': return <GraduationCap className="w-4 h-4" />;
+      case 'Swords': return <Swords className="w-4 h-4" />;
+      case 'Wand2': return <Wand2 className="w-4 h-4" />;
+      default: return <MessageSquareQuote className="w-4 h-4" />;
+    }
+  };
+
+  const getToneLabel = (toneId: ToneOption) => {
+    switch (toneId) {
+      case 'cinematic': return t.toneCinematic;
+      case 'conversational': return t.toneConversational;
+      case 'formal': return t.toneFormal;
+      case 'humorous': return t.toneHumorous;
+      case 'educational': return t.toneEducational;
+      case 'epic': return t.toneEpic;
+      case 'custom': return t.toneCustom;
+      default: return toneId;
+    }
+  };
+
+  const getToneDescription = (toneId: ToneOption) => {
+    switch (toneId) {
+      case 'cinematic': return t.toneDescCinematic;
+      case 'conversational': return t.toneDescConversational;
+      case 'formal': return t.toneDescFormal;
+      case 'humorous': return t.toneDescHumorous;
+      case 'educational': return t.toneDescEducational;
+      case 'epic': return t.toneDescEpic;
+      case 'custom': return t.toneDescCustom;
+      default: return '';
+    }
+  };
+
+  const handleSwapLanguages = () => {
+    if (sourceLanguage !== 'auto') {
+      const prevSource = sourceLanguage;
+      setSourceLanguage(targetLanguage);
+      setTargetLanguage(prevSource);
+    }
+  };
+
+  const applyCustomPreset = (presetText: string) => {
+    setSelectedTone('custom');
+    if (customPrompt.trim()) {
+      setCustomPrompt(`${customPrompt}\n${presetText}`);
+    } else {
+      setCustomPrompt(presetText);
+    }
+  };
+
+  return (
+    <div className={`w-full bg-white/95 dark:bg-slate-900/90 rounded-2xl border p-5 lg:p-6 shadow-md dark:shadow-2xl backdrop-blur-md flex flex-col gap-6 transition-all duration-300 ${
+      isGameMode
+        ? 'border-purple-500/25 dark:border-purple-500/35 shadow-purple-500/5'
+        : 'border-blue-500/25 dark:border-blue-500/35 shadow-blue-500/5'
+    }`}>
+      
+      {/* Panel Header */}
+      <div className="flex items-center justify-between gap-2 pb-3 border-b border-slate-200 dark:border-slate-800 flex-wrap">
+        <div className="flex items-center gap-2">
+          {mode === 'game' ? (
+            <Gamepad2 className="w-5 h-5 text-purple-500" />
+          ) : (
+            <Film className="w-5 h-5 text-blue-500" />
+          )}
+          <h2 className="text-base font-bold text-slate-900 dark:text-white">
+            {mode === 'game' ? t.gameSettings : t.subtitleSettings}
+          </h2>
+          <span className={`text-[10px] px-2.5 py-0.5 rounded-full font-bold uppercase ${
+            mode === 'game' 
+              ? 'bg-purple-500/10 text-purple-600 dark:text-purple-400 border border-purple-500/25' 
+              : 'bg-blue-500/10 text-blue-600 dark:text-blue-400 border border-blue-500/25'
+          }`}>
+            {mode === 'game' ? 'Game Localization Engine' : 'Cinema Subtitle Engine'}
+          </span>
+        </div>
+
+        {/* Bilingual Subtitle toggle (Cinema Mode only) */}
+        {mode === 'cinema' && onOpenBilingualModal && (
+          <button
+            type="button"
+            onClick={onOpenBilingualModal}
+            className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold border transition-all ${
+              isBilingualActive
+                ? 'bg-purple-50 dark:bg-purple-950/40 text-purple-700 dark:text-purple-300 border-purple-300 dark:border-purple-700/60 ring-2 ring-purple-500/20 shadow-sm'
+                : 'bg-slate-100 hover:bg-purple-50 dark:bg-slate-800 dark:hover:bg-purple-950/30 text-slate-700 dark:text-slate-300 hover:text-purple-600 dark:hover:text-purple-300 border-slate-200 dark:border-slate-700'
+            }`}
+          >
+            <Sparkles className="w-3.5 h-3.5 text-purple-600 dark:text-purple-400" />
+            <span>{t.bilingualSubtitles}</span>
+            {isBilingualActive && (
+              <span className="w-1.5 h-1.5 rounded-full bg-purple-500 animate-pulse" />
+            )}
+          </button>
+        )}
+      </div>
+
+      {/* AI Provider & Model Selector (Unified for Gemini, OpenAI, DeepSeek, Groq, Claude, OpenRouter, etc.) */}
+      {setSelectedModel && (
+        <div className="bg-slate-50/90 dark:bg-slate-950/70 p-3.5 rounded-2xl border border-slate-200/90 dark:border-slate-800/90 flex flex-col gap-3.5 transition-all">
+          
+          {/* Header Row with Active Engine & Guide Button */}
+          <div className="flex items-center justify-between gap-2 flex-wrap">
+            <div className="flex items-center gap-2">
+              <div className="p-1.5 rounded-lg bg-indigo-500/10 text-indigo-600 dark:text-indigo-400">
+                <Zap className="w-4 h-4" />
+              </div>
+              <div>
+                <span className="text-xs font-bold text-slate-800 dark:text-slate-200 flex items-center gap-1.5">
+                  <span>{uiLang === 'en' ? 'AI Provider & Model Engine' : 'سرویس‌دهنده و نوع مدل هوش مصنوعی'}</span>
+                  <span className={`text-[10px] px-2 py-0.2 rounded-full border font-medium ${currentProviderDef.badgeColor}`}>
+                    {currentProviderDef.name.split(' ')[0]}
+                  </span>
+                </span>
+                <span className="text-[10px] text-slate-500 dark:text-slate-400">
+                  {uiLang === 'en' 
+                    ? 'Switch between AI providers or choose the optimal model for speed and translation accuracy.'
+                    : 'سرویس‌دهنده دلخواه را انتخاب کنید و نوع مدل را متناسب با سرعت و دقت ترجمه مشخص نمایید.'}
+                </span>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-2">
+              {onOpenApiKeyModal && (() => {
+                const keysCount = getProviderKeys(safeProvider).length;
+                return (
+                  <button
+                    type="button"
+                    onClick={onOpenApiKeyModal}
+                    className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl text-xs font-semibold bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 hover:border-indigo-400 dark:hover:border-indigo-600 text-slate-700 dark:text-slate-200 transition-all shadow-xs"
+                    title={uiLang === 'en' ? 'Manage API keys and endpoints' : 'تنظیمات کلیدهای API و اندپوینت‌ها'}
+                  >
+                    <Key className="w-3.5 h-3.5 text-indigo-500" />
+                    <span>{uiLang === 'en' ? 'API Keys' : 'کلیدها'} ({keysCount})</span>
+                  </button>
+                );
+              })()}
+
+              <button
+                type="button"
+                onClick={() => setIsGuideOpen(true)}
+                className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl text-xs font-semibold bg-indigo-50 hover:bg-indigo-100 dark:bg-indigo-950/50 dark:hover:bg-indigo-900/60 text-indigo-700 dark:text-indigo-300 border border-indigo-200 dark:border-indigo-800 transition-all shadow-xs shrink-0"
+                title={t.modelGuideTitle}
+              >
+                <HelpCircle className="w-3.5 h-3.5 text-indigo-600 dark:text-indigo-400" />
+                <span className="hidden xs:inline sm:inline">{t.aiModelGuide}</span>
+              </button>
+            </div>
+          </div>
+
+          {/* 1. Fast AI Provider Selector Bar */}
+          <div className="flex flex-col gap-1.5">
+            <span className="text-[11px] font-semibold text-slate-600 dark:text-slate-400 flex items-center justify-between">
+              <span className="flex items-center gap-1">
+                <Layers className="w-3.5 h-3.5 text-indigo-500" />
+                <span>{uiLang === 'en' ? 'Select AI Provider:' : 'انتخاب سرویس‌دهنده هوش مصنوعی:'}</span>
+              </span>
+              <span className="text-[10px] text-slate-500">
+                {uiLang === 'en' ? 'Active: ' : 'فعال: '}
+                <strong className="text-indigo-600 dark:text-indigo-400">{currentProviderDef.name}</strong>
+              </span>
+            </span>
+
+            <div className="grid grid-cols-3 sm:grid-cols-5 md:grid-cols-9 gap-1.5">
+              {ALL_PROVIDERS_LIST.map((prov) => {
+                const isActive = activeProvider === prov.id;
+                const keysCount = getProviderKeys(prov.id).length;
+
+                return (
+                  <button
+                    key={prov.id}
+                    type="button"
+                    onClick={() => handleSwitchProvider(prov.id)}
+                    className={`relative p-2 rounded-xl border text-start flex flex-col justify-between gap-1 transition-all cursor-pointer ${
+                      isActive
+                        ? 'bg-indigo-50/80 dark:bg-indigo-950/40 border-indigo-500 dark:border-indigo-500 ring-2 ring-indigo-500/20 shadow-xs'
+                        : 'bg-white/80 dark:bg-slate-900/80 border-slate-200/80 dark:border-slate-800 hover:border-slate-300 dark:hover:border-slate-700'
+                    }`}
+                  >
+                    <div className="flex items-center gap-1.5 w-full">
+                      <span className={`p-1 rounded-lg ${isActive ? 'bg-indigo-600 text-white' : 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400'}`}>
+                        {renderProviderIcon(prov.iconName, 'w-3 h-3')}
+                      </span>
+                      <span className={`text-[11px] font-bold truncate ${isActive ? 'text-indigo-700 dark:text-indigo-300' : 'text-slate-800 dark:text-slate-200'}`}>
+                        {prov.name.split(' ')[0]}
+                      </span>
+                    </div>
+
+                    <div className="flex items-center justify-between text-[9px] w-full pt-1 border-t border-slate-100 dark:border-slate-800/80">
+                      <span className="text-slate-400 font-mono">
+                        {keysCount > 0 ? `${keysCount} 🔑` : '–'}
+                      </span>
+                      {isActive && (
+                        <span className="w-1.5 h-1.5 rounded-full bg-emerald-500" />
+                      )}
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* 2. Model Selection Dropdown for Active Provider */}
+          <div className="flex flex-col gap-1.5 pt-1">
+            <div className="flex items-center justify-between text-[11px] font-semibold text-slate-600 dark:text-slate-400">
+              <span className="flex items-center gap-1">
+                <Sparkles className="w-3.5 h-3.5 text-indigo-500" />
+                <span>
+                  {uiLang === 'en' 
+                    ? `Select Model for ${currentProviderDef.name}:` 
+                    : `انتخاب نوع مدل برای ${currentProviderDef.name}:`}
+                </span>
+              </span>
+
+              <div className="flex items-center gap-2">
+                <span className="text-[10px] text-slate-500">
+                  {uiLang === 'en' ? 'Selected: ' : 'مدل فعال: '}
+                  <strong className="font-mono text-indigo-600 dark:text-indigo-400">
+                    {currentActiveModel}
+                  </strong>
+                </span>
+
+                <button
+                  type="button"
+                  onClick={() => setIsCustomModelInputVisible(!isCustomModelInputVisible)}
+                  className="text-[10px] text-indigo-600 dark:text-indigo-400 hover:underline flex items-center gap-0.5 font-semibold"
+                >
+                  <Edit3 className="w-3 h-3" />
+                  <span>{isCustomModelInputVisible ? (uiLang === 'en' ? 'Close' : 'بستن') : (uiLang === 'en' ? 'Custom ID' : 'مدل دستی')}</span>
+                </button>
+              </div>
+            </div>
+
+            {/* Dropdown Select */}
+            <div className="relative">
+              <select
+                value={currentActiveModel}
+                onChange={(e) => handleSelectModelForActiveProvider(e.target.value)}
+                className="w-full text-xs font-medium bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded-xl px-3 py-2.5 text-slate-900 dark:text-slate-100 focus:ring-2 focus:ring-indigo-500 focus:border-indigo-500 transition-all font-sans cursor-pointer shadow-xs"
+              >
+                {activeProvider === 'gemini' ? (
+                  AI_MODELS.map((m) => (
+                    <option key={m.id} value={m.id}>
+                      {m.displayLabel || `${m.name} — ${m.badge}`}
+                    </option>
+                  ))
+                ) : (
+                  <>
+                    {currentProviderModels.map((m) => (
+                      <option key={m.id} value={m.id}>
+                        {m.name} ({m.id}) {m.badge ? `— ${m.badge}` : ''}
+                      </option>
+                    ))}
+                    {currentActiveModel && !currentProviderModels.some((m) => m.id === currentActiveModel) && (
+                      <option value={currentActiveModel}>
+                        {currentActiveModel} (شناسه دستی)
+                      </option>
+                    )}
+                  </>
+                )}
+              </select>
+            </div>
+
+            {/* Custom Model Text Input (Optional) */}
+            {isCustomModelInputVisible && (
+              <div className="flex items-center gap-2 p-2 rounded-xl bg-indigo-50/50 dark:bg-indigo-950/20 border border-indigo-200 dark:border-indigo-900/60 mt-1">
+                <span className="text-[11px] text-slate-600 dark:text-slate-400 whitespace-nowrap">
+                  {uiLang === 'en' ? 'Type Model ID:' : 'شناسه دلخواه مدل:'}
+                </span>
+                <input
+                  type="text"
+                  value={customModelDraft}
+                  onChange={(e) => setCustomModelDraft(e.target.value)}
+                  placeholder={currentProviderDef.defaultModel || 'e.g. gpt-4o, claude-3-7-sonnet...'}
+                  className="flex-1 text-xs font-mono bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-700 rounded-lg px-2.5 py-1.5 text-slate-900 dark:text-white focus:ring-2 focus:ring-indigo-500 focus:outline-none"
+                  dir="ltr"
+                />
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (customModelDraft.trim()) {
+                      handleSelectModelForActiveProvider(customModelDraft.trim());
+                      setCustomModelDraft('');
+                      setIsCustomModelInputVisible(false);
+                    }
+                  }}
+                  disabled={!customModelDraft.trim()}
+                  className="px-3 py-1.5 text-xs font-bold bg-indigo-600 hover:bg-indigo-700 disabled:opacity-50 text-white rounded-lg transition-all shrink-0"
+                >
+                  {uiLang === 'en' ? 'Apply' : 'اعمال'}
+                </button>
+              </div>
+            )}
+          </div>
+
+          {/* 3. Quick Segmented Model Cards */}
+          <div className="flex flex-col gap-1.5">
+            <span className="text-[10px] text-slate-500 font-medium">
+              {uiLang === 'en' ? 'Quick Model Presets:' : 'مدل‌های محبوب و پیشنهادی برای انتخاب سریع:'}
+            </span>
+
+            {activeProvider === 'gemini' ? (
+              <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-7 gap-1.5">
+                {AI_MODELS.map((m) => {
+                  const isSelected = selectedModel === m.id;
+                  return (
+                    <button
+                      key={m.id}
+                      type="button"
+                      onClick={() => handleSelectModelForActiveProvider(m.id)}
+                      className={`group relative text-start p-2 rounded-xl border transition-all flex flex-col justify-between gap-1.5 overflow-hidden ${
+                        isSelected
+                          ? 'bg-white dark:bg-slate-900 border-indigo-500 dark:border-indigo-500 ring-2 ring-indigo-500/20 shadow-sm shadow-indigo-500/5'
+                          : 'bg-white/70 dark:bg-slate-900/50 border-slate-200/80 dark:border-slate-800 hover:border-slate-300 dark:hover:border-slate-700 hover:bg-white dark:hover:bg-slate-900'
+                      }`}
+                    >
+                      <div className="flex items-center gap-1.5 w-full">
+                        <div className={`p-1 rounded-lg shrink-0 ${isSelected ? 'bg-indigo-50 dark:bg-indigo-950/60' : 'bg-slate-100 dark:bg-slate-800'}`}>
+                          {getModelIcon(m.id)}
+                        </div>
+                        <span className={`text-[11px] font-bold truncate ${isSelected ? 'text-indigo-700 dark:text-indigo-300' : 'text-slate-800 dark:text-slate-200'}`}>
+                          {m.name}
+                        </span>
+                      </div>
+
+                      <div className="flex items-center justify-between gap-1 text-[9px] w-full pt-1 border-t border-slate-100 dark:border-slate-800/80">
+                        <span className={`font-semibold px-1 py-0.2 rounded border truncate ${m.badgeColor}`}>
+                          {m.status === 'preview' ? 'Preview' : m.badge.split('/')[0].trim()}
+                        </span>
+                        {m.speed && (
+                          <span className="text-slate-500 dark:text-slate-400 font-mono shrink-0">
+                            {m.speed.split(' ')[0]}
+                          </span>
+                        )}
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            ) : (
+              <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-4 gap-2">
+                {currentProviderModels.map((m) => {
+                  const isSelected = currentActiveModel === m.id;
+                  return (
+                    <button
+                      key={m.id}
+                      type="button"
+                      onClick={() => handleSelectModelForActiveProvider(m.id)}
+                      className={`group relative text-start p-2.5 rounded-xl border transition-all flex flex-col justify-between gap-2 overflow-hidden cursor-pointer ${
+                        isSelected
+                          ? 'bg-white dark:bg-slate-900 border-indigo-500 dark:border-indigo-500 ring-2 ring-indigo-500/20 shadow-md'
+                          : 'bg-white/70 dark:bg-slate-900/50 border-slate-200/80 dark:border-slate-800 hover:border-slate-300 dark:hover:border-slate-700'
+                      }`}
+                    >
+                      <div className="flex items-center justify-between w-full">
+                        <span className={`text-xs font-bold truncate ${isSelected ? 'text-indigo-600 dark:text-indigo-400' : 'text-slate-900 dark:text-white'}`}>
+                          {m.name}
+                        </span>
+                        {isSelected ? (
+                          <CheckCircle className="w-3.5 h-3.5 text-indigo-600 dark:text-indigo-400 shrink-0" />
+                        ) : (
+                          <div className="w-3 h-3 rounded-full border border-slate-300 dark:border-slate-700 shrink-0" />
+                        )}
+                      </div>
+
+                      <p className="text-[11px] text-slate-500 dark:text-slate-400 leading-snug line-clamp-2">
+                        {m.descFa}
+                      </p>
+
+                      <div className="flex items-center justify-between text-[9px] w-full pt-1.5 border-t border-slate-100 dark:border-slate-800">
+                        {m.badge && (
+                          <span className={`px-1.5 py-0.2 rounded font-medium ${m.badgeColor || 'bg-slate-100 dark:bg-slate-800 text-slate-600 dark:text-slate-400'}`}>
+                            {m.badge}
+                          </span>
+                        )}
+                        {m.speed && (
+                          <span className="font-mono text-slate-400">
+                            {m.speed}
+                          </span>
+                        )}
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+
+          {/* 4. Active Model Insight Bar */}
+          {(() => {
+            if (activeProvider === 'gemini') {
+              const activeM = AI_MODELS.find((m) => m.id === selectedModel) || AI_MODELS[0];
+              const desc = uiLang === 'en' ? activeM.descriptionEn : uiLang === 'ar' ? activeM.descriptionAr : activeM.descriptionFa;
+              return (
+                <div className="bg-white/80 dark:bg-slate-900/80 p-2.5 rounded-xl border border-slate-200/60 dark:border-slate-800/60 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs">
+                  <div className="flex items-start sm:items-center gap-2">
+                    <div className="shrink-0 mt-0.5 sm:mt-0">
+                      {getModelIcon(activeM.id)}
+                    </div>
+                    <div className="text-slate-600 dark:text-slate-300 text-[11px] leading-relaxed">
+                      <strong className="text-slate-800 dark:text-slate-100 me-1">{activeM.name}:</strong>
+                      <span>{desc}</span>
+                      {activeM.quality && (
+                        <span className="ms-2 text-[10px] text-amber-600 dark:text-amber-400 font-medium">
+                          {activeM.quality}
+                        </span>
+                      )}
+                      {activeM.status === 'preview' && (
+                        <span className="ms-2 px-1.5 py-0.5 rounded text-[9px] bg-purple-500/10 text-purple-600 dark:text-purple-400 border border-purple-500/20 font-mono">
+                          Preview Tier
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              );
+            } else {
+              const matchingModel = currentProviderModels.find((m) => m.id === currentActiveModel);
+              return (
+                <div className="bg-white/80 dark:bg-slate-900/80 p-2.5 rounded-xl border border-slate-200/60 dark:border-slate-800/60 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs">
+                  <div className="flex items-start sm:items-center gap-2">
+                    <div className="shrink-0 mt-0.5 sm:mt-0 p-1 rounded-lg bg-indigo-50 dark:bg-indigo-950/60 text-indigo-600 dark:text-indigo-400">
+                      {renderProviderIcon(currentProviderDef.iconName, 'w-3.5 h-3.5')}
+                    </div>
+                    <div className="text-slate-600 dark:text-slate-300 text-[11px] leading-relaxed">
+                      <strong className="text-slate-800 dark:text-slate-100 me-1">
+                        {currentProviderDef.name} ({matchingModel?.name || currentActiveModel}):
+                      </strong>
+                      <span>
+                        {matchingModel?.descFa || currentProviderDef.descriptionFa}
+                      </span>
+                      {matchingModel?.badge && (
+                        <span className="ms-2 px-1.5 py-0.5 rounded text-[9px] bg-indigo-500/10 text-indigo-600 dark:text-indigo-400 border border-indigo-500/20 font-mono">
+                          {matchingModel.badge}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              );
+            }
+          })()}
+
+        </div>
+      )}
+
+      {/* Language Selection Row */}
+      <div className="grid grid-cols-1 md:grid-cols-[1fr_auto_1fr] items-end gap-3">
+        {/* Source Language */}
+        <SearchableLanguageSelect
+          value={sourceLanguage}
+          onChange={setSourceLanguage}
+          label={t.sourceLang}
+          includeAuto={true}
+          detectedLangText={detectedSourceLang ? `${uiLang === 'en' ? 'Auto:' : 'تشخیص:'} ${detectedSourceLang}` : undefined}
+          uiLang={uiLang}
+        />
+
+        {/* Swap Button */}
+        <div className="flex items-center justify-center pb-1">
+          <button
+            type="button"
+            onClick={handleSwapLanguages}
+            disabled={sourceLanguage === 'auto'}
+            className="p-2.5 rounded-xl bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 disabled:opacity-40 text-slate-700 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white border border-slate-300 dark:border-slate-700 transition-colors"
+            title={t.swapLanguages}
+          >
+            <ArrowLeftRight className="w-4 h-4" />
+          </button>
+        </div>
+
+        {/* Target Language */}
+        <SearchableLanguageSelect
+          value={targetLanguage}
+          onChange={setTargetLanguage}
+          label={t.targetLang}
+          includeAuto={false}
+          uiLang={uiLang}
+        />
+      </div>
+
+      {/* Game Column Mapping (Only for Game Mode with CSV/XLSX columns) */}
+      {mode === 'game' && hasGameFile && gameColumns && gameColumns.length > 0 && gameMapping && setGameMapping && (
+        <div className="bg-purple-500/5 dark:bg-purple-950/20 p-4 rounded-xl border border-purple-500/20 dark:border-purple-500/30 flex flex-col gap-3">
+          <div className="flex items-center justify-between gap-2 flex-wrap">
+            <div className="flex items-center gap-2 text-xs font-bold text-slate-900 dark:text-white">
+              <TableProperties className="w-4 h-4 text-purple-600 dark:text-purple-400" />
+              <span>{t.gameMappingTitle}</span>
+            </div>
+            <span className="text-[11px] text-slate-500 dark:text-slate-400">
+              {uiLang === 'en' 
+                ? 'Select the column to translate. All other columns remain untouched.' 
+                : 'ستون متن جهت ترجمه را انتخاب کنید. تمامی ستون‌های دیگر دست‌نخورده حفظ می‌شوند.'}
+            </span>
+          </div>
+
+          <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
+            {/* Source Column */}
+            <div className="p-2.5 rounded-lg bg-white dark:bg-slate-900 border border-purple-500/30 shadow-xs">
+              <label className="text-[11px] font-bold text-purple-700 dark:text-purple-300 block mb-1 flex items-center justify-between">
+                <span>{t.sourceColumn}</span>
+                <span className="text-[9px] bg-purple-500/10 text-purple-600 dark:text-purple-400 px-1.5 py-0.5 rounded font-mono">To Translate</span>
+              </label>
+              <select
+                value={gameMapping.sourceColumn}
+                onChange={(e) => setGameMapping({ ...gameMapping, sourceColumn: e.target.value })}
+                className="w-full text-xs font-medium bg-slate-50 dark:bg-slate-800 border border-purple-300 dark:border-purple-700/60 rounded-md p-2 text-slate-900 dark:text-white focus:ring-2 focus:ring-purple-500 focus:outline-none"
+              >
+                {gameColumns.map((col) => (
+                  <option key={col} value={col}>{col}</option>
+                ))}
+              </select>
+            </div>
+
+            {/* Target Column */}
+            <div className="p-2.5 rounded-lg bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs">
+              <label className="text-[11px] font-semibold text-slate-700 dark:text-slate-300 block mb-1">
+                {t.targetColumn}
+              </label>
+              <select
+                value={gameMapping.targetColumn}
+                onChange={(e) => setGameMapping({ ...gameMapping, targetColumn: e.target.value })}
+                className="w-full text-xs bg-slate-50 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-md p-2 text-slate-800 dark:text-slate-200 focus:ring-2 focus:ring-purple-500 focus:outline-none"
+              >
+                {gameColumns.map((col) => (
+                  <option key={col} value={col}>{col}</option>
+                ))}
+                {!gameColumns.includes(gameMapping.targetColumn) && (
+                  <option value={gameMapping.targetColumn}>{gameMapping.targetColumn} (New Column)</option>
+                )}
+              </select>
+            </div>
+
+            {/* Key/ID Column */}
+            <div className="p-2.5 rounded-lg bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-800 shadow-xs">
+              <label className="text-[11px] font-semibold text-slate-700 dark:text-slate-300 block mb-1">
+                {t.keyColumn}
+              </label>
+              <select
+                value={gameMapping.keyColumn || ''}
+                onChange={(e) => setGameMapping({ ...gameMapping, keyColumn: e.target.value || undefined })}
+                className="w-full text-xs bg-slate-50 dark:bg-slate-800 border border-slate-300 dark:border-slate-700 rounded-md p-2 text-slate-800 dark:text-slate-200 focus:ring-2 focus:ring-purple-500 focus:outline-none"
+              >
+                <option value="">-- None / Auto Row ID --</option>
+                {gameColumns.map((col) => (
+                  <option key={col} value={col}>{col}</option>
+                ))}
+              </select>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Tone Selection Cards (Expanded with Epic + Custom) */}
+      <div className="flex flex-col gap-2">
+        <label className="text-xs font-semibold text-slate-700 dark:text-slate-300 flex items-center gap-1.5">
+          <MessageSquareQuote className="w-4 h-4 text-purple-600 dark:text-purple-400" />
+          <span>{t.translationTone}:</span>
+        </label>
+
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-7 gap-2.5">
+          {TONE_OPTIONS.map((tone) => {
+            const isSelected = selectedTone === tone.id;
+            return (
+              <div
+                key={tone.id}
+                onClick={() => setSelectedTone(tone.id)}
+                className={`p-3 rounded-xl border cursor-pointer transition-all duration-200 flex flex-col justify-between gap-2 relative overflow-hidden ${
+                  isSelected
+                    ? tone.id === 'epic'
+                      ? 'bg-amber-50 dark:bg-amber-950/30 border-amber-500 ring-2 ring-amber-500/20 text-slate-900 dark:text-white shadow-md'
+                      : tone.id === 'custom'
+                      ? 'bg-purple-50 dark:bg-purple-950/30 border-purple-500 ring-2 ring-purple-500/20 text-slate-900 dark:text-white shadow-md'
+                      : 'bg-indigo-50 dark:bg-indigo-600/15 border-indigo-500 ring-2 ring-indigo-500/20 text-slate-900 dark:text-white shadow-md'
+                    : 'bg-slate-50 dark:bg-slate-950/40 border-slate-200 dark:border-slate-800/80 hover:border-slate-300 dark:hover:border-slate-700 text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
+                }`}
+              >
+                <div className="flex items-center justify-between">
+                  <span className={`p-1.5 rounded-lg ${
+                    isSelected 
+                      ? tone.id === 'epic' 
+                        ? 'bg-amber-500/20 text-amber-700 dark:text-amber-300'
+                        : tone.id === 'custom'
+                        ? 'bg-purple-500/20 text-purple-700 dark:text-purple-300'
+                        : 'bg-indigo-500/20 text-indigo-700 dark:text-indigo-300' 
+                      : 'bg-slate-200 dark:bg-slate-800 text-slate-600 dark:text-slate-400'
+                  }`}>
+                    {getToneIcon(tone.iconName)}
+                  </span>
+                  {isSelected && (
+                    <span className={`w-2 h-2 rounded-full animate-pulse ${
+                      tone.id === 'epic' ? 'bg-amber-500' : tone.id === 'custom' ? 'bg-purple-500' : 'bg-indigo-500'
+                    }`} />
+                  )}
+                </div>
+
+                <div>
+                  <h4 className="text-xs font-bold text-slate-900 dark:text-white">
+                    {getToneLabel(tone.id)}
+                  </h4>
+                  <p className="text-[10px] text-slate-500 dark:text-slate-400 mt-1 line-clamp-2 leading-relaxed">
+                    {getToneDescription(tone.id)}
+                  </p>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      {/* Custom Prompt / Instructions Section (when Custom Tone is selected or toggled) */}
+      {selectedTone === 'custom' && (
+        <div className="bg-purple-50/70 dark:bg-purple-950/20 p-4 rounded-xl border border-purple-200 dark:border-purple-800/60 flex flex-col gap-3">
+          <div className="flex items-center justify-between gap-2 flex-wrap">
+            <label className="text-xs font-bold text-purple-900 dark:text-purple-300 flex items-center gap-1.5">
+              <Wand2 className="w-4 h-4 text-purple-600 dark:text-purple-400" />
+              <span>{t.customPromptLabel}</span>
+            </label>
+            <span className="text-[11px] text-slate-500 dark:text-slate-400">
+              {/* FIX (L2): hardcoded Persian label → i18n-aware tri-lingual text */}
+              {customPrompt.length} {uiLang === 'en' ? 'characters' : uiLang === 'ar' ? 'حرف' : 'کاراکتر'}
+            </span>
+          </div>
+
+          <textarea
+            value={customPrompt}
+            onChange={(e) => setCustomPrompt(e.target.value)}
+            placeholder={t.customPromptPlaceholder}
+            rows={3}
+            className="w-full text-xs bg-white dark:bg-slate-900 border border-purple-200 dark:border-purple-800/80 rounded-xl p-3 text-slate-900 dark:text-slate-100 placeholder-slate-400 dark:placeholder-slate-500 focus:ring-2 focus:ring-purple-500 focus:border-purple-500 transition-all font-sans leading-relaxed"
+          />
+
+          {/* Quick Preset Chips */}
+          <div className="flex items-center gap-1.5 flex-wrap">
+            <span className="text-[10px] font-semibold text-slate-500 dark:text-slate-400 flex items-center gap-1">
+              <Sparkles className="w-3 h-3 text-purple-500" />
+              {/* FIX (L2): hardcoded Persian label → i18n-aware tri-lingual text */}
+              {uiLang === 'en' ? 'Quick presets:' : uiLang === 'ar' ? 'القوالب السريعة:' : 'الگوهای سریع:'}
+            </span>
+            <button
+              type="button"
+              onClick={() => applyCustomPreset(t.customPromptPresetGlossary)}
+              className="text-[10px] px-2.5 py-1 rounded-lg bg-purple-100 dark:bg-purple-900/40 text-purple-800 dark:text-purple-300 hover:bg-purple-200 dark:hover:bg-purple-800/60 border border-purple-300 dark:border-purple-700/50 transition-colors"
+            >
+              {t.customPromptPresetGlossary}
+            </button>
+            <button
+              type="button"
+              onClick={() => applyCustomPreset(t.customPromptPresetRpg)}
+              className="text-[10px] px-2.5 py-1 rounded-lg bg-amber-100 dark:bg-amber-900/40 text-amber-800 dark:text-amber-300 hover:bg-amber-200 dark:hover:bg-amber-800/60 border border-amber-300 dark:border-amber-700/50 transition-colors"
+            >
+              {t.customPromptPresetRpg}
+            </button>
+            <button
+              type="button"
+              onClick={() => applyCustomPreset(t.customPromptPresetMilitary)}
+              className="text-[10px] px-2.5 py-1 rounded-lg bg-slate-200 dark:bg-slate-800 text-slate-800 dark:text-slate-300 hover:bg-slate-300 dark:hover:bg-slate-700 border border-slate-300 dark:border-slate-700 transition-colors"
+            >
+              {t.customPromptPresetMilitary}
+            </button>
+            <button
+              type="button"
+              onClick={() => applyCustomPreset(t.customPromptPresetNoCensor)}
+              className="text-[10px] px-2.5 py-1 rounded-lg bg-rose-100 dark:bg-rose-900/40 text-rose-800 dark:text-rose-300 hover:bg-rose-200 dark:hover:bg-rose-800/60 border border-rose-300 dark:border-rose-700/50 transition-colors"
+            >
+              {t.customPromptPresetNoCensor}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Advanced Performance, Rate-Limit Pacing & Localization Options Accordion - Available in both Cinema and Game modes */}
+      <div className="rounded-xl border transition-all duration-300 overflow-hidden bg-purple-950/10 dark:bg-purple-950/20 border-purple-500/20 dark:border-purple-500/30">
+        <button
+          type="button"
+          onClick={() => setShowAdvancedSettings(!showAdvancedSettings)}
+          className="w-full flex items-center justify-between p-3.5 text-xs font-bold transition-colors hover:bg-black/5 dark:hover:bg-white/5"
+        >
+          <div className="flex items-center gap-2 flex-wrap">
+            <Cpu className="w-4 h-4 text-purple-600 dark:text-purple-400 shrink-0" />
+            <span className="text-slate-900 dark:text-white">
+              {isGameMode ? t.advancedGameOptions : t.advancedSubtitleOptions}
+            </span>
+            <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-purple-500/10 text-purple-600 dark:text-purple-300 border border-purple-500/20">
+              Batch: {batchSize}
+            </span>
+            {rateLimitPacing && (
+              <span className="text-[10px] font-medium px-2 py-0.5 rounded-full bg-amber-500/15 text-amber-700 dark:text-amber-300 border border-amber-500/30 flex items-center gap-1">
+                <ShieldAlert className="w-3 h-3 text-amber-500" />
+                {t.rateLimitPacingBadge}
+              </span>
+            )}
+            {isGameMode && (
+              <span className="text-[10px] font-mono px-2 py-0.5 rounded-full bg-slate-500/10 text-slate-600 dark:text-slate-400 border border-slate-500/20">
+                {skipCodeOnly ? 'Auto-Skip ON' : 'Auto-Skip OFF'}
+              </span>
+            )}
+          </div>
+
+          <div className="flex items-center gap-1 text-slate-500 shrink-0">
+            <span className="text-[11px] font-normal hidden sm:inline">
+              {showAdvancedSettings ? (uiLang === 'en' ? 'Collapse' : uiLang === 'ar' ? 'طي' : 'بستن') : (uiLang === 'en' ? 'Expand settings' : uiLang === 'ar' ? 'عرض الإعدادات' : 'نمایش تنظیمات')}
+            </span>
+            {showAdvancedSettings ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+          </div>
+        </button>
+
+        {showAdvancedSettings && (
+          <div className="p-4 pt-2 border-t border-slate-200/60 dark:border-slate-800/80 flex flex-col gap-4">
+            
+            {/* Rate Limit Protection & Request Pacing Option (Both Cinema & Game modes) */}
+            <div className="flex flex-col gap-2 p-3 rounded-xl bg-white/80 dark:bg-slate-900/80 border border-amber-500/30 dark:border-amber-500/40 shadow-xs">
+              <div className="flex items-start sm:items-center justify-between gap-3">
+                <div className="flex-1">
+                  <div className="text-xs font-bold text-slate-900 dark:text-slate-100 flex items-center gap-1.5 flex-wrap">
+                    <ShieldAlert className="w-4 h-4 text-amber-500 shrink-0" />
+                    <span>{t.rateLimitPacing}</span>
+                    {rateLimitPacing && (
+                      <span className="text-[9px] bg-amber-500/20 text-amber-700 dark:text-amber-300 px-1.5 py-0.5 rounded font-mono font-bold">
+                        ACTIVE
+                      </span>
+                    )}
+                  </div>
+                  <p className="text-[11px] text-slate-600 dark:text-slate-400 mt-1 leading-relaxed">
+                    {t.rateLimitPacingDesc}
+                  </p>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => setRateLimitPacing && setRateLimitPacing(!rateLimitPacing)}
+                  className={`p-2 rounded-xl border transition-all shrink-0 flex items-center gap-1.5 text-xs font-bold ${
+                    rateLimitPacing
+                      ? 'bg-amber-500 text-slate-950 border-amber-400 shadow-md shadow-amber-500/20'
+                      : 'bg-slate-100 dark:bg-slate-800 text-slate-500 border-slate-300 dark:border-slate-700 hover:text-slate-800 dark:hover:text-slate-200'
+                  }`}
+                  title={t.rateLimitPacing}
+                >
+                  {rateLimitPacing ? (
+                    <>
+                      <CheckSquare className="w-4 h-4" />
+                      <span>{uiLang === 'en' ? 'Active' : uiLang === 'ar' ? 'مفعّل' : 'فعال'}</span>
+                    </>
+                  ) : (
+                    <>
+                      <Square className="w-4 h-4" />
+                      <span>{uiLang === 'en' ? 'Disabled' : uiLang === 'ar' ? 'معطّل' : 'غیرفعال'}</span>
+                    </>
+                  )}
+                </button>
+              </div>
+
+              {/* Warning Alert Box Placed Directly Below the Option */}
+              <div className="mt-1 flex items-start gap-2.5 p-3 rounded-lg bg-amber-500/10 dark:bg-amber-950/40 border border-amber-500/30 text-amber-900 dark:text-amber-200">
+                <AlertTriangle className="w-4 h-4 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" />
+                <div className="text-xs leading-relaxed">
+                  <p className="font-medium">
+                    {t.rateLimitPacingWarning}
+                  </p>
+                </div>
+              </div>
+            </div>
+
+            {/* User-Configurable Batch Size Section */}
+            <div className="flex flex-col gap-3 p-3 rounded-xl bg-white/70 dark:bg-slate-900/70 border border-slate-200 dark:border-slate-800/70 shadow-xs">
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+                <div>
+                  <div className="flex items-center gap-2">
+                    <label className="text-xs font-bold text-slate-800 dark:text-slate-200 flex items-center gap-1.5">
+                      <Layers className="w-3.5 h-3.5 text-purple-600 dark:text-purple-400" />
+                      <span>{t.batchSize}</span>
+                    </label>
+                    <span className="text-[10px] font-mono font-bold px-2 py-0.5 rounded-full bg-purple-500/15 text-purple-700 dark:text-purple-300 border border-purple-500/30">
+                      {batchSize} {t.linesPerBatch}
+                    </span>
+                  </div>
+                  <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">
+                    {t.batchSizeDesc}
+                  </p>
+                </div>
+
+                {/* Custom Number Input Stepper */}
+                <div className="flex items-center gap-1.5 self-start sm:self-center bg-slate-100 dark:bg-slate-800/90 p-1 rounded-xl border border-slate-200 dark:border-slate-700">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (setBatchSize) {
+                        const newSize = Math.max(5, (batchSize || 35) - 5);
+                        setBatchSize(newSize);
+                      }
+                    }}
+                    className="p-1 rounded-lg hover:bg-white dark:hover:bg-slate-700 text-slate-600 dark:text-slate-300 transition-colors active:scale-95"
+                    title="-5"
+                  >
+                    <Minus className="w-3.5 h-3.5" />
+                  </button>
+
+                  <input
+                    type="number"
+                    min={5}
+                    max={200}
+                    value={batchSize || 35}
+                    onChange={(e) => {
+                      const val = parseInt(e.target.value, 10);
+                      // FIX (L6): the numeric input accepted 1 while the stepper buttons enforced
+                      // a minimum of 5 (and the help text mentioned a third limit). One single
+                      // bound (5) is now applied everywhere.
+                      if (!isNaN(val) && val >= 5 && setBatchSize) {
+                        setBatchSize(Math.min(200, Math.max(5, val)));
+                      }
+                    }}
+                    className="w-14 text-center text-xs font-mono font-bold bg-white dark:bg-slate-900 border border-slate-300 dark:border-slate-750 rounded-lg py-1 px-1 text-purple-700 dark:text-purple-300 focus:ring-1 focus:ring-purple-500 focus:outline-none"
+                  />
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (setBatchSize) {
+                        const newSize = Math.min(200, (batchSize || 35) + 5);
+                        setBatchSize(newSize);
+                      }
+                    }}
+                    className="p-1 rounded-lg hover:bg-white dark:hover:bg-slate-700 text-slate-600 dark:text-slate-300 transition-colors active:scale-95"
+                    title="+5"
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                  </button>
+                </div>
+              </div>
+
+              {/* Quick Presets Row */}
+              <div className="flex items-center gap-1.5 flex-wrap pt-2 border-t border-slate-100 dark:border-slate-800/80">
+                <span className="text-[10px] font-semibold text-slate-500 dark:text-slate-400">
+                  {t.presetBatchSizes}:
+                </span>
+                {([15, 25, 35, 45, 60, 75, 100] as BatchSizeOption[]).map((size) => {
+                  const isCurrent = batchSize === size;
+                  const isRecommended = size === 45;
+                  return (
+                    <button
+                      key={size}
+                      type="button"
+                      onClick={() => setBatchSize && setBatchSize(size)}
+                      className={`relative px-2.5 py-1 text-xs font-mono font-bold rounded-lg transition-all ${
+                        isCurrent
+                          ? 'bg-purple-600 text-white shadow-xs scale-105'
+                          : isRecommended
+                          ? 'bg-purple-500/10 dark:bg-purple-900/30 text-purple-700 dark:text-purple-300 border border-purple-500/40 hover:bg-purple-500/20'
+                          : 'bg-slate-100 dark:bg-slate-800/80 text-slate-600 dark:text-slate-300 hover:text-slate-900 dark:hover:text-white hover:bg-slate-200 dark:hover:bg-slate-700 border border-slate-200/80 dark:border-slate-700/60'
+                      }`}
+                      title={isRecommended ? 'اندازه پیشنهادی هوشمند برای بهینه‌سازی سرعت و سهمیه' : undefined}
+                    >
+                      {size}
+                      {isRecommended && !isCurrent && (
+                        <span className="ml-1 text-[9px] text-amber-500 font-sans">★</span>
+                      )}
+                    </button>
+                  );
+                })}
+              </div>
+
+              {/* Helpful RPM Tip */}
+              <p className="text-[10px] text-purple-600 dark:text-purple-400 font-medium">
+                {uiLang === 'en'
+                  ? '💡 Recommendation: Batch 45 cuts requests in half, prevents 429 quota exhaustion, and doubles overall speed.'
+                  : '💡 پیشنهاد هوشمند: بسته ۴۵ تعداد درخواست‌ها در دقیقه را به نصف کاهش می‌دهد و مانع از خطای ۴۲۹ و پر شدن سهمیه می‌شود.'}
+              </p>
+            </div>
+
+            {/* Game-specific: Skip Code-Only / Non-Text Rows Toggle */}
+            {isGameMode && (
+              <div className="flex items-start sm:items-center justify-between gap-3 p-2.5 rounded-lg bg-white/60 dark:bg-slate-900/60 border border-slate-200 dark:border-slate-800/60">
+                <div>
+                  <div className="text-xs font-bold text-slate-800 dark:text-slate-200 flex items-center gap-1.5">
+                    <FileCode2 className="w-3.5 h-3.5 text-emerald-500" />
+                    <span>{t.skipCodeOnly}</span>
+                  </div>
+                  <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">
+                    {t.skipCodeOnlyDesc}
+                  </p>
+                </div>
+
+                <button
+                  type="button"
+                  onClick={() => setSkipCodeOnly && setSkipCodeOnly(!skipCodeOnly)}
+                  className={`p-1.5 rounded-lg border transition-all shrink-0 ${
+                    skipCodeOnly
+                      ? 'bg-emerald-500/20 text-emerald-600 dark:text-emerald-400 border-emerald-500/40'
+                      : 'bg-slate-100 dark:bg-slate-800 text-slate-400 border-slate-300 dark:border-slate-700'
+                  }`}
+                >
+                  {skipCodeOnly ? <CheckSquare className="w-4 h-4" /> : <Square className="w-4 h-4" />}
+                </button>
+              </div>
+            )}
+
+            {/* Append Hidden RTL Markers (\u200f) Toggle */}
+            {/* FIX (B17): previously game-only — the toggle was removed from the cinema UI while
+                the cinema exporter still appended markers by default. It is now available in BOTH
+                modes and its value is actually passed to every export function. */}
+            <div className="flex items-start sm:items-center justify-between gap-3 p-2.5 rounded-lg bg-white/60 dark:bg-slate-900/60 border border-slate-200 dark:border-slate-800/60">
+              <div>
+                <div className="text-xs font-bold text-slate-800 dark:text-slate-200 flex items-center gap-1.5">
+                  <Languages className="w-3.5 h-3.5 text-indigo-500" />
+                  <span>{t.appendRTLMarkers}</span>
+                </div>
+                <p className="text-[11px] text-slate-500 dark:text-slate-400 mt-0.5">
+                  {t.appendRTLMarkersDesc}
+                </p>
+              </div>
+
+              <button
+                type="button"
+                onClick={() => setAppendRTLMarkers && setAppendRTLMarkers(!appendRTLMarkers)}
+                className={`p-1.5 rounded-lg border transition-all shrink-0 ${
+                  appendRTLMarkers
+                    ? 'bg-indigo-500/20 text-indigo-600 dark:text-indigo-400 border-indigo-500/40'
+                    : 'bg-slate-100 dark:bg-slate-800 text-slate-400 border-slate-300 dark:border-slate-700'
+                }`}
+              >
+                {appendRTLMarkers ? <CheckSquare className="w-4 h-4" /> : <Square className="w-4 h-4" />}
+              </button>
+            </div>
+
+          </div>
+        )}
+      </div>
+
+      {/* Target Export Format & Start Action */}
+      <div className="flex flex-col sm:flex-row items-center justify-between gap-4 pt-4 border-t border-slate-200 dark:border-slate-800">
+        {/* Export Format selector */}
+        <div className="flex items-center gap-2 text-xs w-full sm:w-auto">
+          <FileType className="w-4 h-4 text-indigo-600 dark:text-indigo-400 shrink-0" />
+          <span className="text-slate-700 dark:text-slate-300 font-semibold">
+            {t.outputFormat}
+          </span>
+          <div className="flex items-center gap-1 bg-slate-100 dark:bg-slate-950 p-1 rounded-xl border border-slate-200 dark:border-slate-800">
+            {mode === 'cinema' ? (
+              (['srt', 'vtt', 'ass', 'ssa', 'sub'] as SubtitleFormat[]).map((fmt) => (
+                <button
+                  key={fmt}
+                  type="button"
+                  onClick={() => setTargetFormat(fmt)}
+                  className={`uppercase text-[11px] font-mono font-bold px-2.5 py-1 rounded-lg transition-colors ${
+                    targetFormat === fmt
+                      ? 'bg-indigo-600 text-white shadow-sm'
+                      : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200 hover:bg-slate-200 dark:hover:bg-slate-800'
+                  }`}
+                >
+                  .{fmt}
+                </button>
+              ))
+            ) : (
+              (['csv', 'json', 'xlsx', 'txt'] as GameFormat[]).map((fmt) => (
+                <button
+                  key={fmt}
+                  type="button"
+                  onClick={() => setTargetFormat(fmt)}
+                  className={`uppercase text-[11px] font-mono font-bold px-2.5 py-1 rounded-lg transition-colors ${
+                    targetFormat === fmt
+                      ? 'bg-emerald-600 text-white shadow-sm'
+                      : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200 hover:bg-slate-200 dark:hover:bg-slate-800'
+                  }`}
+                >
+                  .{fmt}
+                </button>
+              ))
+            )}
+          </div>
+        </div>
+
+        {/* Start Translation Button */}
+        <button
+          onClick={onStartTranslation}
+          disabled={isTranslating || itemCount === 0}
+          className={`w-full sm:w-auto flex items-center justify-center gap-2 px-6 py-3 rounded-xl font-bold text-xs text-white shadow-xl disabled:opacity-50 disabled:cursor-not-allowed transition-all active:scale-95 ${
+            mode === 'game'
+              ? 'bg-gradient-to-r from-emerald-600 via-teal-600 to-indigo-600 hover:from-emerald-500 hover:to-indigo-500 border border-emerald-400/30 shadow-emerald-600/30'
+              : 'bg-gradient-to-r from-indigo-600 via-indigo-500 to-purple-600 hover:from-indigo-500 hover:to-purple-500 border border-indigo-400/30 shadow-indigo-600/30'
+          }`}
+        >
+          <Sparkles className="w-4 h-4 animate-spin-slow" />
+          <span>
+            {isTranslating ? t.processing : `${t.startTranslation} ${itemCount > 0 ? `(${itemCount} ${t.linesCount})` : ''}`}
+          </span>
+        </button>
+      </div>
+
+      {/* Model Selection Guide Modal */}
+      {setSelectedModel && (
+        <ModelGuideModal
+          isOpen={isGuideOpen}
+          onClose={() => setIsGuideOpen(false)}
+          uiLang={uiLang}
+          selectedModel={selectedModel}
+          onSelectModel={setSelectedModel}
+        />
+      )}
+    </div>
+  );
+};

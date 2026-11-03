@@ -1,0 +1,335 @@
+import React from 'react';
+import { SubtitleFormat, GameFormat, AppMode, AIProvider } from '../types';
+import { UILanguage, TRANSLATIONS } from '../lib/i18n';
+import { SUBGAME_LAB_LOGO } from '../assets/logo';
+import { AI_PROVIDERS_CONFIG } from '../lib/providersConfig';
+import { 
+  Subtitles, 
+  Download, 
+  RotateCcw, 
+  Sparkles, 
+  Sun, 
+  Moon, 
+  FileText,
+  Lock,
+  Loader2,
+  Key,
+  Globe,
+  HelpCircle,
+  Film,
+  Gamepad2,
+  Folder,
+  Send,
+  Github,
+  Server
+} from 'lucide-react';
+
+interface HeaderProps {
+  darkMode: boolean;
+  setDarkMode: (val: boolean) => void;
+  uiLang: UILanguage;
+  setUiLang: (lang: UILanguage) => void;
+  mode: AppMode;
+  setMode: (mode: AppMode) => void;
+  onOpenApiKeyModal: () => void;
+  onOpenHelpModal?: () => void;
+  onOpenBilingualModal?: () => void;
+  userApiKey: string;
+  activeProvider?: AIProvider;
+  customProviderName?: string;
+  onExport: () => void;
+  onReset: () => void;
+  hasSubtitles: boolean;
+  subtitleFormat?: SubtitleFormat | GameFormat;
+  fileName?: string;
+  isTranslating?: boolean;
+  isFullyTranslated?: boolean;
+  completionPercentage?: number;
+  translatedItemsCount?: number;
+  totalItemsCount?: number;
+  isBilingualActive?: boolean;
+  tokenStats?: { totalTokens: number; remainingTokens: number };
+}
+
+export const Header: React.FC<HeaderProps> = ({
+  darkMode,
+  setDarkMode,
+  uiLang,
+  setUiLang,
+  mode,
+  setMode,
+  onOpenApiKeyModal,
+  onOpenHelpModal,
+  userApiKey,
+  activeProvider = 'gemini',
+  customProviderName,
+  onExport,
+  onReset,
+  hasSubtitles,
+  subtitleFormat,
+  fileName,
+  isTranslating = false,
+  isFullyTranslated = false,
+  completionPercentage = 0,
+  translatedItemsCount = 0,
+  totalItemsCount = 0,
+  tokenStats,
+}) => {
+  const t = TRANSLATIONS[uiLang];
+
+  const getHelpBtnText = () => {
+    if (uiLang === 'en') return 'Guide';
+    if (uiLang === 'ar') return 'دليل';
+    return 'راهنما';
+  };
+
+  return (
+    <header className="sticky top-0 z-40 backdrop-blur-md bg-white/95 dark:bg-slate-950/90 border-b border-slate-200 dark:border-slate-800/80 px-4 sm:px-6 lg:px-8 py-2.5 shadow-xs dark:shadow-md transition-colors">
+      <div className="max-w-7xl mx-auto flex flex-col md:flex-row items-center justify-between gap-3">
+        
+        {/* Left: Brand / Logo */}
+        <div className="flex items-center justify-between w-full md:w-auto gap-4 shrink-0">
+          <div className="flex items-center gap-2.5 sm:gap-3">
+            <div className={`w-9 h-9 sm:w-10 sm:h-10 rounded-xl overflow-hidden shadow-sm p-0.5 border transition-all duration-300 shrink-0 ${
+              mode === 'folders'
+                ? 'border-emerald-500/50 shadow-emerald-500/10'
+                : mode === 'game'
+                ? 'border-purple-500/50 shadow-purple-500/10'
+                : 'border-blue-500/50 shadow-blue-500/10'
+            }`}>
+              <img
+                src={SUBGAME_LAB_LOGO}
+                alt="SubGame Lab Logo"
+                referrerPolicy="no-referrer"
+                className="w-full h-full object-cover rounded-lg"
+              />
+            </div>
+            
+            <div>
+              <div className="flex items-center gap-2">
+                <h1 className="text-base font-bold text-slate-900 dark:text-white tracking-tight shrink-0">
+                  {t.appTitle}
+                </h1>
+                <span className={`text-[10px] font-semibold px-2 py-0.5 rounded-full border hidden sm:inline-flex items-center gap-1 shrink-0 ${
+                  mode === 'folders'
+                    ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400 border-emerald-500/20'
+                    : mode === 'game'
+                    ? 'bg-purple-500/10 text-purple-600 dark:text-purple-400 border-purple-500/20'
+                    : 'bg-blue-500/10 text-blue-600 dark:text-blue-400 border-blue-500/20'
+                }`}>
+                  {mode === 'folders' ? 'پوشه‌ها و سرور' : mode === 'game' ? 'Game Mode' : 'Cinema Mode'}
+                </span>
+              </div>
+              <p className="text-[11px] text-slate-500 dark:text-slate-400 hidden lg:block leading-tight truncate max-w-[220px] xl:max-w-[280px]">
+                {mode === 'folders' ? 'پوشه‌بندی، دیتابیس و ترجمه پس‌زمینه سرور' : mode === 'cinema' ? t.appSubtitle : t.modeGameDesc}
+              </p>
+            </div>
+          </div>
+        </div>
+
+        {/* Center: Standalone Mode Switcher (Folders vs Cinema vs Game) */}
+        <div className="flex items-center justify-center shrink-0 w-full md:w-auto">
+          <div className="flex items-center bg-slate-100 dark:bg-slate-900/90 p-1 rounded-2xl border border-slate-200 dark:border-slate-800 shadow-xs gap-1">
+            <button
+              type="button"
+              onClick={() => setMode('folders')}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold transition-all ${
+                mode === 'folders'
+                  ? 'bg-emerald-600 text-white shadow-sm ring-1 ring-emerald-500/30'
+                  : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
+              }`}
+              title="پوشه‌بندی، دیتابیس زیرنویس‌ها و ترجمه خودکار در پس‌زمینه سرور (بدون نیاز به باز بودن مرورگر)"
+            >
+              <Folder className="w-3.5 h-3.5" />
+              <span>پوشه‌ها و ترجمه سرور</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setMode('cinema')}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold transition-all ${
+                mode === 'cinema'
+                  ? 'bg-blue-600 text-white shadow-sm ring-1 ring-blue-500/30'
+                  : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
+              }`}
+              title={t.modeMovieTitle}
+            >
+              <Film className="w-3.5 h-3.5" />
+              <span>{t.modeCinemaShort}</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setMode('game')}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold transition-all ${
+                mode === 'game'
+                  ? 'bg-purple-600 text-white shadow-sm ring-1 ring-purple-500/30'
+                  : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-white'
+              }`}
+              title={t.modeGameTitle}
+            >
+              <Gamepad2 className="w-3.5 h-3.5" />
+              <span>{t.modeGameShort}</span>
+            </button>
+          </div>
+        </div>
+
+        {/* Right: Controls & Actions */}
+        <div className="flex items-center gap-1.5 sm:gap-2 w-full md:w-auto justify-end flex-wrap">
+          
+          {/* Loaded File Badge */}
+          {hasSubtitles && fileName && (
+            <div className="hidden 2xl:flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-slate-100 dark:bg-slate-800/80 border border-slate-200 dark:border-slate-700 text-xs text-slate-700 dark:text-slate-300 shrink-0">
+              <FileText className="w-3.5 h-3.5 text-indigo-500" />
+              <span className="max-w-[110px] truncate font-medium">{fileName}</span>
+              <span className="uppercase text-[9px] font-mono px-1 py-0.5 rounded bg-indigo-500/10 text-indigo-600 dark:text-indigo-300 font-bold">
+                {subtitleFormat}
+              </span>
+            </div>
+          )}
+
+          {/* Token Usage Badge */}
+          {tokenStats && tokenStats.totalTokens > 0 && (
+            <div
+              className="flex items-center gap-1.5 px-2.5 py-1 rounded-xl bg-amber-500/10 text-amber-700 dark:text-amber-300 border border-amber-500/20 text-xs font-mono font-bold shrink-0"
+              title={uiLang === 'en' ? `Total Tokens: ${tokenStats.totalTokens.toLocaleString()}` : `کل توکن مصرفی: ${tokenStats.totalTokens.toLocaleString()}`}
+            >
+              <span className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse shrink-0" />
+              <span>{tokenStats.totalTokens.toLocaleString()} tok</span>
+            </div>
+          )}
+
+          {/* Guide / Help Button */}
+          {onOpenHelpModal && (
+            <button
+              onClick={onOpenHelpModal}
+              className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-semibold rounded-xl bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 border border-slate-200 dark:border-slate-700 transition-all active:scale-95 shrink-0"
+              title={getHelpBtnText()}
+            >
+              <HelpCircle className="w-3.5 h-3.5 text-indigo-500" />
+              <span>{getHelpBtnText()}</span>
+            </button>
+          )}
+
+          {/* Social Icons (Telegram & GitHub) in Compact Form */}
+          <div className="flex items-center gap-1">
+            <a
+              href="https://t.me/MySaeedLab"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="p-1.5 rounded-xl bg-sky-500/10 hover:bg-sky-500/20 text-sky-600 dark:text-sky-400 border border-sky-500/20 hover:border-sky-400 transition-all active:scale-95 shrink-0"
+              title="SaeedLab Telegram Channel (@MySaeedLab)"
+            >
+              <Send className="w-3.5 h-3.5" />
+            </a>
+
+            <a
+              href="https://github.com/gguhfhu7-sketch/SubGame-Lab"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="p-1.5 rounded-xl bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 border border-slate-200 dark:border-slate-700 transition-all active:scale-95 shrink-0"
+              title="GitHub Repository"
+            >
+              <Github className="w-3.5 h-3.5" />
+            </a>
+          </div>
+
+          {/* UI Language Switcher */}
+          <div className="flex items-center bg-slate-100 dark:bg-slate-800/80 p-0.5 rounded-xl border border-slate-200 dark:border-slate-700/80 shrink-0">
+            <button
+              onClick={() => setUiLang('fa')}
+              className={`text-[11px] font-semibold px-2 py-1 rounded-lg transition-colors ${
+                uiLang === 'fa' ? 'bg-indigo-600 text-white shadow-xs' : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
+              }`}
+              title="فارسی"
+            >
+              FA
+            </button>
+            <button
+              onClick={() => setUiLang('en')}
+              className={`text-[11px] font-semibold px-2 py-1 rounded-lg transition-colors ${
+                uiLang === 'en' ? 'bg-indigo-600 text-white shadow-xs' : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
+              }`}
+              title="English"
+            >
+              EN
+            </button>
+            <button
+              onClick={() => setUiLang('ar')}
+              className={`text-[11px] font-semibold px-2 py-1 rounded-lg transition-colors ${
+                uiLang === 'ar' ? 'bg-indigo-600 text-white shadow-xs' : 'text-slate-600 dark:text-slate-400 hover:text-slate-900 dark:hover:text-slate-200'
+              }`}
+              title="العربية (Arabic)"
+            >
+              AR
+            </button>
+          </div>
+
+
+
+          {/* Reset File Button */}
+          {hasSubtitles && (
+            <button
+              onClick={onReset}
+              className="p-2 rounded-xl text-slate-600 dark:text-slate-400 hover:text-rose-600 dark:hover:text-rose-400 bg-slate-100 hover:bg-rose-50 dark:bg-slate-800 dark:hover:bg-rose-950/40 border border-slate-200 dark:border-slate-700 hover:border-rose-300 transition-all active:scale-95 shrink-0"
+              title="Reset"
+            >
+              <RotateCcw className="w-3.5 h-3.5" />
+            </button>
+          )}
+
+          {/* Export / Download Button */}
+          {hasSubtitles && (
+            <button
+              onClick={onExport}
+              // FIX (B9): the download button is no longer locked until 100% translation.
+              // It is only disabled DURING an active translation run — a partially translated
+              // file can always be exported (App shows an informed confirm dialog and the
+              // exporters already fall back to the original text for untranslated rows).
+              disabled={isTranslating}
+              className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-bold rounded-xl transition-all shrink-0 ${
+                isTranslating
+                  ? 'bg-indigo-100 dark:bg-indigo-950/80 text-indigo-700 dark:text-indigo-300 border border-indigo-300 dark:border-indigo-700/60 cursor-wait'
+                  : isFullyTranslated
+                  ? 'text-white bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 border border-emerald-500/30 shadow-md active:scale-95'
+                  : 'text-white bg-gradient-to-r from-amber-600 to-orange-600 hover:from-amber-500 hover:to-orange-500 border border-amber-500/30 shadow-md active:scale-95'
+              }`}
+              title={
+                isTranslating
+                  ? `${t.processing} (${completionPercentage}%)...`
+                  : !isFullyTranslated
+                  ? `${t.downloadPartial} (${translatedItemsCount}/${totalItemsCount})`
+                  : t.downloadSubtitle
+              }
+            >
+              {isTranslating ? (
+                <>
+                  <Loader2 className="w-3.5 h-3.5 animate-spin text-indigo-600 dark:text-indigo-400" />
+                  <span>{completionPercentage}%</span>
+                </>
+              ) : !isFullyTranslated ? (
+                <>
+                  <Download className="w-3.5 h-3.5 text-white" />
+                  <span>{translatedItemsCount}/{totalItemsCount}</span>
+                </>
+              ) : (
+                <>
+                  <Download className="w-3.5 h-3.5 text-white" />
+                  <span>{mode === 'game' ? t.downloadGameFiles : t.downloadSubtitle}</span>
+                </>
+              )}
+            </button>
+          )}
+
+          {/* Dark Mode Toggle */}
+          <button
+            onClick={() => setDarkMode(!darkMode)}
+            className="p-2 rounded-xl bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700 text-slate-700 dark:text-slate-300 border border-slate-200 dark:border-slate-700 transition-colors shrink-0"
+            title={darkMode ? 'Light Theme' : 'Dark Theme'}
+          >
+            {darkMode ? <Sun className="w-3.5 h-3.5 text-amber-400" /> : <Moon className="w-3.5 h-3.5 text-indigo-600" />}
+          </button>
+
+        </div>
+      </div>
+    </header>
+  );
+};
