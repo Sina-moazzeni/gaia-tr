@@ -1071,6 +1071,28 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
     }
   };
 
+  // Turbo Complete: Instantly resolves audio tags and prioritizes 90%+ incomplete files to finish within seconds
+  const [isTurboCompleting, setIsTurboCompleting] = useState(false);
+  const handleTurboComplete = async () => {
+    setIsTurboCompleting(true);
+    try {
+      const res = await fetch('/api/worker/turbo-complete', { method: 'POST' });
+      const data = await res.json();
+      if (data.success) {
+        onShowToast(data.message || 'حالت توربو فعال شد: فایل‌های دارای سطر ناقص با اولویت فوری در صف قرار گرفتند.', 'success');
+        await fetchFolders();
+        if (selectedFolderId) await fetchProjects(selectedFolderId);
+        await fetchAllProjects();
+      } else {
+        onShowToast(data.error || 'خطا در فعال‌سازی توربو', 'error');
+      }
+    } catch {
+      onShowToast('خطا در برقراری ارتباط با سرور برای حالت توربو', 'error');
+    } finally {
+      setIsTurboCompleting(false);
+    }
+  };
+
   // Full Database Backup Download
   const handleDownloadBackup = () => {
     const link = document.createElement('a');
@@ -1375,6 +1397,22 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
           >
             {isResumingAll ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Play className="w-3.5 h-3.5 text-emerald-400 fill-current" />}
             <span>ادامه کل فایل‌ها</span>
+          </button>
+
+          {/* Turbo Complete Incomplete Files Button */}
+          <button
+            type="button"
+            onClick={handleTurboComplete}
+            disabled={isTurboCompleting}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold bg-amber-500/20 text-amber-300 hover:bg-amber-500/30 border border-amber-500/40 shadow-md shadow-amber-950/20 transition-all cursor-pointer"
+            title="تکمیل فوری و اولویت‌دار فایل‌های ناقص (۹۸٪ به بالا) بدون معطلی و با رفع خودکار افکت‌های صوتی"
+          >
+            {isTurboCompleting ? (
+              <Loader2 className="w-3.5 h-3.5 animate-spin text-amber-400" />
+            ) : (
+              <Sparkles className="w-3.5 h-3.5 text-amber-400" />
+            )}
+            <span>⚡ تکمیل فوری سطرها (توربو ۱۰۰٪)</span>
           </button>
 
           {/* Server Settings Button */}
@@ -1875,6 +1913,17 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
                 >
                   <RotateCcw className="w-3.5 h-3.5" />
                   <span>ادامه فایل‌های ناقص</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={handleTurboComplete}
+                  disabled={isTurboCompleting}
+                  className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold text-amber-300 bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/30 shadow-xs transition-colors cursor-pointer"
+                  title="تکمیل فوری فایل‌های دارای سطر ناقص (۹۸٪ به بالا) بدون معطلی و با اولویت صف"
+                >
+                  {isTurboCompleting ? <Loader2 className="w-3.5 h-3.5 animate-spin text-amber-400" /> : <Sparkles className="w-3.5 h-3.5 text-amber-400" />}
+                  <span>⚡ تکمیل فوری (توربو)</span>
                 </button>
 
                 <button

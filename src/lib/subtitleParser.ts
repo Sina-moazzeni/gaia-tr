@@ -58,24 +58,34 @@ export function isCueProperlyTranslated(
   const cleanTrans = translatedText.trim();
   const cleanOrig = (originalText || '').trim();
 
-  // If original has no letters (e.g. only numbers, punctuation, timestamps)
-  const hasLatinLetters = /[a-zA-Z]/.test(cleanOrig);
+  // Strip subtitle formatting tags (e.g. <i>, </i>, {\an8}, etc.) before evaluating letters
+  const stripFormatting = (s: string) => s.replace(/<[^>]+>|\{[^}]+\}/g, '').trim();
+  const strippedOrig = stripFormatting(cleanOrig);
+  const strippedTrans = stripFormatting(cleanTrans);
+
+  // If original has no letters at all (e.g. only numbers, punctuation, timestamps, musical notes ♪, symbols)
+  const hasLatinLetters = /[a-zA-Z]/.test(strippedOrig);
   if (!hasLatinLetters) {
+    return cleanTrans.length > 0;
+  }
+
+  // If original is purely a sound effect or musical symbol like "[Music]", "♪", "(Applause)"
+  if (/^[♪♫\s\d\-.,:;!?_#@$*~|/\\()\[\]{}]+$/.test(strippedOrig)) {
     return cleanTrans.length > 0;
   }
 
   // If target is Persian, Arabic, or Urdu:
   if (['fa', 'ar', 'ur'].includes(targetLanguage)) {
-    const hasPersianOrArabic = /[\u0600-\u06FF\uFB50-\uFDFF\uFE70-\uFEFF]/.test(cleanTrans);
+    const hasPersianOrArabic = /[\u0600-\u06FF\uFB50-\uFDFF\uFE70-\uFEFF]/.test(strippedTrans);
     if (!hasPersianOrArabic) {
-      // It has Latin letters in source, but zero Persian/Arabic characters in translation!
-      // This is still in English!
+      // It has Latin letters in source, but zero Persian/Arabic characters in translation
       return false;
     }
   }
 
-  // If translation is identical to original and original is more than 3 chars
-  if (cleanOrig.length > 3 && cleanTrans.toLowerCase() === cleanOrig.toLowerCase()) {
+  // If translation is identical to original and original has more than 3 letters
+  const origLettersOnly = strippedOrig.replace(/[^a-zA-Z]/g, '');
+  if (origLettersOnly.length > 3 && strippedTrans.toLowerCase() === strippedOrig.toLowerCase()) {
     return false;
   }
 

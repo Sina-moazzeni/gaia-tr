@@ -71,7 +71,8 @@ import {
   testServerKey,
   resetWorkerExhaustionBackoff,
   pauseAllTranslations,
-  resumeAllTranslations
+  resumeAllTranslations,
+  turboCompleteIncompleteProjects
 } from './src/server/backgroundWorker';
 
 dotenv.config();
@@ -2850,6 +2851,20 @@ app.post('/api/worker/resume-all', (req, res) => {
     });
   } catch (err: any) {
     return res.status(500).json({ success: false, error: err?.message || 'Failed to resume translations' });
+  }
+});
+
+// 18d. Turbo Complete All Incomplete Projects (SRJF + Sound Tag Auto-resolve)
+app.post('/api/worker/turbo-complete', (req, res) => {
+  try {
+    const stats = turboCompleteIncompleteProjects();
+    return res.json({
+      success: true,
+      ...stats,
+      message: `حالت توربو فعال شد: ${stats.queuedProjects} فایل دارای سطر ناقص در اولویت صف قرار گرفتند و ${stats.autoFixedCues} سطر افکت صوتی به صورت فوری برطرف گردید.`,
+    });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message || 'Failed to turbo complete' });
   }
 });
 
