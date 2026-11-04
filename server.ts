@@ -56,6 +56,7 @@ import {
   resetAllKeyCooldowns,
   resetKeyStats,
   auditAndFixEnglishCues,
+  retryDisruptedAndIncompleteProjects,
   ServerSubtitleProject
 } from './src/server/database';
 import {
@@ -2735,9 +2736,43 @@ app.get('/api/server/config', (req, res) => {
 
 app.post('/api/server/config', (req, res) => {
   try {
-    const { allowedOrigin, geminiBaseUrl, maxConcurrentProjects, maxTotalParallelKeys } = req.body || {};
-    const updated = updateServerConfig({ allowedOrigin, geminiBaseUrl, maxConcurrentProjects, maxTotalParallelKeys });
+    const { allowedOrigin, geminiBaseUrl, maxConcurrentProjects, maxTotalParallelKeys, maxKeysPerProject } = req.body || {};
+    const updated = updateServerConfig({ allowedOrigin, geminiBaseUrl, maxConcurrentProjects, maxTotalParallelKeys, maxKeysPerProject });
     return res.json({ success: true, config: updated, message: 'تنظیمات سرور با موفقیت به‌روزرسانی شد.' });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message });
+  }
+});
+
+// 16b. Retry disrupted, error, or incomplete projects across all folders or a specific folder
+app.post('/api/projects/retry-incomplete', (req, res) => {
+  try {
+    const { folderId } = req.body || {};
+    const result = retryDisruptedAndIncompleteProjects(folderId);
+    return res.json({
+      success: true,
+      retriedCount: result.retriedCount,
+      projectNames: result.projectNames,
+      message: result.retriedCount > 0
+        ? `تعداد ${result.retriedCount} فایل دارای خطا یا ناقص برای ادامه ترجمه و رفع اختلال مجدداً در صف قرار گرفتند.`
+        : 'هیچ فایل دارای خطا یا ناقصی یافت نشد. همه فایل‌ها تکمیل شده یا در حال ترجمه هستند.',
+    });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message });
+  }
+});
+
+app.post('/api/folders/:folderId/retry-incomplete', (req, res) => {
+  try {
+    const result = retryDisruptedAndIncompleteProjects(req.params.folderId);
+    return res.json({
+      success: true,
+      retriedCount: result.retriedCount,
+      projectNames: result.projectNames,
+      message: result.retriedCount > 0
+        ? `تعداد ${result.retriedCount} فایل دارای خطا در این پوشه برای رفع اختلال و ادامه ترجمه در صف قرار گرفتند.`
+        : 'تمام فایل‌های این پوشه سالم و بدون اختلال هستند.',
+    });
   } catch (err: any) {
     return res.status(500).json({ success: false, error: err?.message });
   }

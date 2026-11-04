@@ -908,7 +908,8 @@ async function processTick(): Promise<void> {
     return;
   }
 
-  const maxActiveFiles = Math.max(1, Math.min(config.maxConcurrentProjects || 4, 16));
+  const defaultKeysPerFile = config.maxKeysPerProject || 2;
+  const maxActiveFiles = Math.max(config.maxConcurrentProjects || 4, Math.ceil(allKeys.length / Math.max(1, defaultKeysPerFile)));
   const maxTotalKeys = Math.max(1, Math.min(config.maxTotalParallelKeys || 8, 32));
   const maxKeyThreads = Math.min(maxTotalKeys, Math.max(1, allKeys.length));
 
@@ -931,65 +932,34 @@ async function processTick(): Promise<void> {
     }
   }
 
-  // 2. Candidate projects needing work:
-  // Projects in 'translating', 'queued', 'has_incomplete', or 'waiting_for_keys'
+  // 2. Candidate projects needing translation (excluding completed and paused)
   const candidateProjects = db.projects.filter((p) => {
     if (p.status === 'completed' || p.status === 'paused') return false;
-    if (p.status === 'translating') return true;
-    if (p.status === 'queued') return true;
-    if (p.status === 'has_incomplete') return true;
-    if (p.status === 'waiting_for_keys') return true;
-    return false;
+    const untranslated = p.items.filter((i) => !i.translatedText || !i.translatedText.trim());
+    return untranslated.length > 0;
   });
 
   if (candidateProjects.length === 0) return;
 
-  // Split projects into:
-  // A. Finisher candidates (few remaining cues)
-  // B. Standard candidates
-  const finisherCandidates: ServerSubtitleProject[] = [];
-  const standardCandidates: ServerSubtitleProject[] = [];
+  // Prioritize:
+  // 1. Projects already partially in flight
+  // 2. Projects with fewer remaining cues (SRJF: near-complete finish fast)
+  // 3. Queued and incomplete projects
+  candidateProjects.sort((a, b) => {
+    const inFlightA = Array.from(inFlightCueKeys).some((k) => k.startsWith(a.id + '_')) ? -1 : 0;
+    const inFlightB = Array.from(inFlightCueKeys).some((k) => k.startsWith(b.id + '_')) ? -1 : 0;
+    if (inFlightA !== inFlightB) return inFlightA - inFlightB;
 
-  for (const proj of candidateProjects) {
-    const untranslatedCount = proj.items.filter((i) => !i.translatedText || !i.translatedText.trim()).length;
-    if (untranslatedCount === 0) continue;
-    const isNearDone = untranslatedCount <= 35 || (proj.totalCues > 0 && (proj.translatedCues / proj.totalCues) >= 0.95);
-    if (isNearDone) {
-      finisherCandidates.push(proj);
-    } else {
-      standardCandidates.push(proj);
-    }
-  }
-
-  // Sort finisher candidates by remaining cues ascending (fewest first - SRJF)
-  finisherCandidates.sort((a, b) => {
     const remA = a.items.filter((i) => !i.translatedText || !i.translatedText.trim()).length;
     const remB = b.items.filter((i) => !i.translatedText || !i.translatedText.trim()).length;
     return remA - remB;
   });
 
-  // Sort standard candidates by remaining cues
-  standardCandidates.sort((a, b) => {
-    const remA = a.totalCues - a.translatedCues;
-    const remB = b.totalCues - b.translatedCues;
-    return remA - remB;
-  });
-
-  // =========================================================================
-  // LANE 1: DEDICATED FINISHER LANE FOR NEAR-COMPLETE SUBTITLES (>= 95%)
-  // User Requirement: Dedicate 1 or 2 keys exclusively for near-complete files,
-  // translating them 1-by-1 (max 2 files concurrently, strictly 1 key per file).
-  // This guarantees a nearly finished file will NEVER occupy 3 keys!
-  // =========================================================================
-  const finisherKeyLimit = finisherCandidates.length > 0 ? (allKeys.length >= 4 && finisherCandidates.length >= 2 ? 2 : 1) : 0;
-  let finisherSlotsDispatched = 0;
-
-  for (const project of finisherCandidates) {
-    if (availableKeySlots <= 0 || finisherSlotsDispatched >= finisherKeyLimit) break;
-
-    // Check if this project already has a key in flight
-    const inFlightForThisProj = Array.from(inFlightCueKeys).some((k) => k.startsWith(project.id + '_'));
-    if (inFlightForThisProj) continue; // Already being processed by its dedicated 1 key!
+  // Multi-File Simultaneous Concurrent Loop:
+  // Iterate across all active candidate files so they all translate concurrently in parallel!
+  let activeFilesCount = 0;
+  for (const project of candidateProjects) {
+    if (availableKeySlots <= 0 || activeFilesCount >= maxActiveFiles) break;
 
     const untranslatedCues = project.items.filter(
       (item) => !item.translatedText || !item.translatedText.trim()
@@ -999,104 +969,34 @@ async function processTick(): Promise<void> {
     const availableCues = untranslatedCues.filter((c) => !inFlightCueKeys.has(project.id + '_' + c.id));
     if (availableCues.length === 0) continue;
 
-    const keyInfo = leaseAvailableKey(Array.from(busyKeys));
-    if (!keyInfo) break;
+    // Keys currently running in flight for this file:
+    const inFlightCount = Array.from(inFlightCueKeys).filter((k) => k.startsWith(project.id + '_')).length;
+    const inFlightBatches = Math.ceil(inFlightCount / BATCH_SIZE);
 
-    const leasedKey = keyInfo.key;
-    busyKeys.add(leasedKey);
-    availableKeySlots--;
-    finisherSlotsDispatched++;
+    // CRITICAL USER REQUIREMENT:
+    // "بعضی از فایل ها به آخر که نزدیک میشن کلید های اضافهی دگه نیاز ندارند کلید رو بزار برای فایل بعدی چون مثلا 20 سطر مانده و نمیشه 2 تا کلید همزمان فعال باشند"
+    // If <= 35 cues left (or <= 1 batch), strictly limit this file to 1 key!
+    // Any extra keys are left for the next files in the queue!
+    const isNearEnd = untranslatedCues.length <= 35 || (project.totalCues > 0 && (project.translatedCues / project.totalCues) >= 0.95);
+    const configuredFileMax = project.maxKeys || defaultKeysPerFile;
+    const fileKeyLimit = isNearEnd ? 1 : Math.min(configuredFileMax, Math.ceil(availableCues.length / BATCH_SIZE));
 
-    // Take ALL remaining cues of this file (up to 35 cues) in a single fast call
-    const chunkCues = availableCues.splice(0, 35);
-    chunkCues.forEach((c) => inFlightCueKeys.add(project.id + '_' + c.id));
+    const keysToDispatch = Math.min(availableKeySlots, Math.max(0, fileKeyLimit - inFlightBatches));
+    if (keysToDispatch <= 0) continue; // Skip to next file so other files get keys!
 
-    project.status = 'translating';
-    project.workerKeyUsed = leasedKey;
-    scheduleSaveDatabase();
+    activeFilesCount++;
 
-    void (async () => {
-      try {
-        await processProjectChunkBatch(project.id, chunkCues, leasedKey);
-      } catch (e) {
-        console.error(`[FinisherLane] Error in worker for ${project.id}:`, e);
-      } finally {
-        chunkCues.forEach((c) => inFlightCueKeys.delete(project.id + '_' + c.id));
-        busyKeys.delete(leasedKey);
-      }
-    })();
-  }
-
-  // =========================================================================
-  // LANE 2: MAIN HEAVY TRANSLATION LANE (STANDARD PROJECTS)
-  // Runs up to maxActiveFiles concurrently with multi-key acceleration!
-  // =========================================================================
-  if (availableKeySlots <= 0 || standardCandidates.length === 0) return;
-
-  const activeInFlightProjectIds = new Set<string>();
-  inFlightCueKeys.forEach((k) => {
-    const pId = k.substring(0, k.indexOf('_'));
-    if (pId) activeInFlightProjectIds.add(pId);
-  });
-
-  const activeWorkingProjects: ServerSubtitleProject[] = [];
-  const selectedProjectIds = new Set<string>();
-
-  // 1. Keep standard projects already in flight
-  for (const pId of activeInFlightProjectIds) {
-    const proj = standardCandidates.find((p) => p.id === pId);
-    if (proj && proj.status !== 'completed' && proj.status !== 'paused') {
-      activeWorkingProjects.push(proj);
-      selectedProjectIds.add(proj.id);
-    }
-  }
-
-  // 2. Fill up to maxActiveFiles from standard candidates
-  for (const proj of standardCandidates) {
-    if (activeWorkingProjects.length >= maxActiveFiles) break;
-    if (!selectedProjectIds.has(proj.id)) {
-      activeWorkingProjects.push(proj);
-      selectedProjectIds.add(proj.id);
-    }
-  }
-
-  if (activeWorkingProjects.length === 0) return;
-
-  // Distribute parallel keys among the active standard files (e.g. 12 keys / 4 files = 3 keys per file = 150 cues!)
-  const targetKeysPerFile = Math.max(1, Math.ceil(availableKeySlots / activeWorkingProjects.length));
-
-  for (const project of activeWorkingProjects) {
-    if (availableKeySlots <= 0) break;
-
-    const untranslatedCues = project.items.filter(
-      (item) => !item.translatedText || !item.translatedText.trim()
-    );
-    if (untranslatedCues.length === 0) continue;
-
-    const availableCues = untranslatedCues.filter((c) => !inFlightCueKeys.has(project.id + '_' + c.id));
-    if (availableCues.length === 0) continue;
-
-    const currentProjectInFlightCount = Array.from(inFlightCueKeys).filter((k) => k.startsWith(project.id + '_')).length;
-    const currentInFlightBatches = Math.ceil(currentProjectInFlightCount / BATCH_SIZE);
-
-    const allowedNewBatches = Math.max(1, targetKeysPerFile - currentInFlightBatches);
-    const maxBatchesForThisPass = Math.min(
-      Math.ceil(availableCues.length / BATCH_SIZE),
-      availableKeySlots,
-      allowedNewBatches
-    );
-
-    let chunksDispatched = 0;
-    while (availableCues.length > 0 && availableKeySlots > 0 && chunksDispatched < maxBatchesForThisPass) {
+    for (let d = 0; d < keysToDispatch && availableCues.length > 0 && availableKeySlots > 0; d++) {
       const keyInfo = leaseAvailableKey(Array.from(busyKeys));
       if (!keyInfo) break;
 
       const leasedKey = keyInfo.key;
       busyKeys.add(leasedKey);
       availableKeySlots--;
-      chunksDispatched++;
 
-      const chunkCues = availableCues.splice(0, BATCH_SIZE);
+      // If near end, take all remaining available cues in a single batch (e.g. 20 lines)
+      const chunkSize = isNearEnd ? Math.min(availableCues.length, 35) : BATCH_SIZE;
+      const chunkCues = availableCues.splice(0, chunkSize);
       chunkCues.forEach((c) => inFlightCueKeys.add(project.id + '_' + c.id));
 
       project.status = 'translating';
