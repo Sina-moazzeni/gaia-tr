@@ -46,7 +46,8 @@ import {
   MoveRight,
   ExternalLink,
   Replace,
-  StopCircle
+  StopCircle,
+  Zap
 } from 'lucide-react';
 import { SubtitleItem, SubtitleFormat, ToneOption } from '../types';
 import { parseSubtitleFile, isCueProperlyTranslated } from '../lib/subtitleParser';
@@ -98,6 +99,8 @@ export interface WorkerStatusData {
   isRunning: boolean;
   activeProjectCount: number;
   maxConcurrentProjects: number;
+  maxTotalParallelKeys?: number;
+  inFlightKeyThreads?: number;
   activeProjects: Array<{
     id: string;
     name: string;
@@ -124,6 +127,7 @@ export interface ServerConfigData {
   allowedOrigin: string;
   geminiBaseUrl: string;
   maxConcurrentProjects: number;
+  maxTotalParallelKeys?: number;
 }
 
 export interface KeyDetailItem {
@@ -217,7 +221,8 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
   const [serverConfig, setServerConfig] = useState<ServerConfigData>({
     allowedOrigin: '*',
     geminiBaseUrl: 'https://generativelanguage.googleapis.com',
-    maxConcurrentProjects: 2,
+    maxConcurrentProjects: 4,
+    maxTotalParallelKeys: 8,
   });
   const [isSavingConfig, setIsSavingConfig] = useState(false);
 
@@ -335,22 +340,31 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
     }
   };
 
-  const handleSetConcurrency = async (val: number) => {
+  const handleSetDualConcurrency = async (files?: number, keys?: number) => {
     try {
+      const payload: Record<string, any> = {};
+      if (files !== undefined) payload.maxConcurrentProjects = files;
+      if (keys !== undefined) payload.maxTotalParallelKeys = keys;
+
       const res = await fetch('/api/server/config', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ maxConcurrentProjects: val }),
+        body: JSON.stringify(payload),
       });
       const data = await res.json();
       if (data.success && data.config) {
         setServerConfig(data.config);
-        onShowToast(`تعداد ترجمه همزمان به ${val} فایل با کلیدهای مجزا تغییر یافت.`, 'success');
+        const f = data.config.maxConcurrentProjects || 4;
+        const k = data.config.maxTotalParallelKeys || 8;
+        const perFile = Math.max(1, Math.floor(k / f));
+        onShowToast(`سرعت سرور تنظیم شد: ${f} فایل همزمان با ${k} کلید موازی (${perFile} کلید در هر فایل = ${perFile * 50} سطر در هر درخواست).`, 'success');
       }
     } catch {
       onShowToast('خطا در به‌روزرسانی تنظیمات سرور', 'error');
     }
   };
+
+  const handleSetConcurrency = (val: number) => handleSetDualConcurrency(val, undefined);
 
   // Upload state
   const [isUploading, setIsUploading] = useState(false);
@@ -1484,33 +1498,105 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
         </div>
       </div>
 
-      {/* Quick Concurrency Control Bar (سرعت ترجمه و تعداد پردازش همزمان) */}
-      <div className="w-full bg-slate-900/60 border border-slate-800 rounded-xl px-4 py-2.5 flex items-center justify-between gap-3 flex-wrap text-xs">
-        <div className="flex items-center gap-2 text-slate-300">
-          <Sliders className="w-3.5 h-3.5 text-indigo-400" />
-          <span className="font-semibold text-slate-200">تعداد ترجمه همزمان فایل‌ها (با کلیدهای اختصاصی مجزا):</span>
-          <span className="text-[11px] text-slate-400 hidden sm:inline">(هر فایل موازی یک کلید از استخر را اختصاص می‌دهد)</span>
+      {/* Quick Concurrency Control Bar (مدیریت همزمان فایل‌ها و کلیدهای موازی) */}
+      <div className="w-full bg-slate-900/80 border border-indigo-500/20 rounded-2xl p-3.5 flex flex-col gap-3 shadow-lg text-xs">
+        {/* Row 1: Files & Keys dual controls */}
+        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3">
+          {/* Files Selector */}
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="font-bold text-slate-200 flex items-center gap-1.5">
+              <FileText className="w-3.5 h-3.5 text-indigo-400" />
+              <span>فایل‌های همزمان:</span>
+            </span>
+            <div className="flex items-center gap-1 flex-wrap">
+              {[1, 2, 4, 6, 8].map((num) => {
+                const isSelected = (serverConfig.maxConcurrentProjects || 4) === num;
+                return (
+                  <button
+                    key={num}
+                    type="button"
+                    onClick={() => handleSetDualConcurrency(num, undefined)}
+                    className={`px-2.5 py-1 rounded-lg font-mono font-bold text-xs transition-all cursor-pointer ${
+                      isSelected
+                        ? 'bg-indigo-600 text-white shadow-xs border border-indigo-400'
+                        : 'bg-slate-800 text-slate-400 hover:text-white hover:bg-slate-700 border border-slate-700/60'
+                    }`}
+                    title={`اجرای همزمان ${num} فایل`}
+                  >
+                    {num} فایل
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* Keys Selector */}
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="font-bold text-amber-300 flex items-center gap-1.5">
+              <Key className="w-3.5 h-3.5 text-amber-400" />
+              <span>کلیدهای فعال در چرخه:</span>
+            </span>
+            <div className="flex items-center gap-1 flex-wrap">
+              {[4, 8, 12, 16, 20, 24].map((num) => {
+                const isSelected = (serverConfig.maxTotalParallelKeys || 8) === num;
+                return (
+                  <button
+                    key={num}
+                    type="button"
+                    onClick={() => handleSetDualConcurrency(undefined, num)}
+                    className={`px-2.5 py-1 rounded-lg font-mono font-bold text-xs transition-all cursor-pointer ${
+                      isSelected
+                        ? 'bg-amber-600 text-white shadow-xs border border-amber-400'
+                        : 'bg-slate-800 text-slate-400 hover:text-amber-200 hover:bg-slate-700 border border-slate-700/60'
+                    }`}
+                    title={`توزیع کار روی ${num} کلید فعال موازی`}
+                  >
+                    {num} کلید
+                  </button>
+                );
+              })}
+            </div>
+          </div>
         </div>
-        <div className="flex items-center gap-1.5 flex-wrap">
-          {[2, 4, 6, 8, 10, 12, 16].map((num) => {
-            const isSelected = (serverConfig.maxConcurrentProjects || 4) === num;
-            return (
-              <button
-                key={num}
-                type="button"
-                onClick={() => handleSetConcurrency(num)}
-                className={`px-2.5 py-1 rounded-lg font-mono font-bold text-xs transition-all ${
-                  isSelected
-                    ? 'bg-indigo-600 text-white shadow-xs border border-indigo-400'
-                    : 'bg-slate-800 text-slate-400 hover:text-white hover:bg-slate-700 border border-slate-700/60'
-                }`}
-                title={`تنظیم ${num} فایل همزمان`}
-              >
-                {num} فایل
-              </button>
-            );
-          })}
-        </div>
+
+        {/* Row 2: Live Speed & Distribution Formula Badge */}
+        {(() => {
+          const files = serverConfig.maxConcurrentProjects || 4;
+          const keys = serverConfig.maxTotalParallelKeys || 8;
+          const keysPerFile = Math.max(1, Math.floor(keys / files));
+          const cuesPerCycle = keysPerFile * 50;
+
+          return (
+            <div className="w-full pt-2.5 border-t border-slate-800/80 flex flex-wrap items-center justify-between gap-2 text-[11px]">
+              <div className="flex items-center gap-2 flex-wrap text-slate-300">
+                <span className="text-amber-400 font-bold flex items-center gap-1">
+                  <Zap className="w-3.5 h-3.5 text-amber-400" />
+                  <span>فرمول سرعت ترجمه:</span>
+                </span>
+                <span className="bg-slate-950 px-2 py-0.5 rounded-md border border-slate-800 text-white font-mono font-bold">
+                  {files} فایل با {keys} کلید
+                </span>
+                <span>➔</span>
+                <span className="bg-indigo-950/70 text-indigo-300 border border-indigo-500/30 px-2 py-0.5 rounded-md font-bold">
+                  {keysPerFile} کلید همزمان روی هر فایل
+                </span>
+                <span>➔</span>
+                <span className="bg-emerald-950/70 text-emerald-300 border border-emerald-500/30 px-2 py-0.5 rounded-md font-bold font-mono">
+                  {cuesPerCycle} سطر در هر درخواست
+                </span>
+                <span className="text-slate-400 hidden sm:inline">
+                  (سطرها دقیقاً بر اساس شناسه زمانی در جای خود ثبت می‌شوند بدون هیچ تداخل یا شیفت زمانی)
+                </span>
+              </div>
+
+              {workerStatus?.inFlightKeyThreads !== undefined && workerStatus.inFlightKeyThreads > 0 && (
+                <span className="text-[10px] font-mono text-cyan-300 bg-cyan-950/60 px-2 py-0.5 rounded-md border border-cyan-500/30">
+                  {workerStatus.inFlightKeyThreads} کلید در حال ارسال درخواست
+                </span>
+              )}
+            </div>
+          );
+        })()}
       </div>
 
       {/* Live Worker Parallel Activity Bar if translating */}
@@ -2903,15 +2989,15 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
                 </p>
               </div>
 
-              {/* Concurrency: maxConcurrentProjects */}
+              {/* Concurrency: maxConcurrentProjects (Active Files) */}
               <div>
                 <label className="text-xs text-slate-300 font-semibold flex items-center justify-between mb-1">
                   <span className="flex items-center gap-1.5">
-                    <Sliders className="w-3.5 h-3.5 text-amber-400" />
-                    <span>تعداد ترجمه همزمان پروژه‌ها (Parallel Workers):</span>
+                    <FileText className="w-3.5 h-3.5 text-indigo-400" />
+                    <span>تعداد فایل‌های ترجمه همزمان (Active Concurrent Files):</span>
                   </span>
-                  <span className="text-xs font-mono font-bold text-amber-400 px-2 py-0.5 rounded bg-slate-950 border border-slate-800">
-                    {serverConfig.maxConcurrentProjects} فایل همزمان
+                  <span className="text-xs font-mono font-bold text-indigo-300 px-2.5 py-0.5 rounded bg-slate-950 border border-slate-800">
+                    {serverConfig.maxConcurrentProjects || 4} فایل
                   </span>
                 </label>
                 <div className="flex items-center gap-4">
@@ -2920,16 +3006,61 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
                     min={1}
                     max={16}
                     step={1}
-                    value={serverConfig.maxConcurrentProjects}
+                    value={serverConfig.maxConcurrentProjects || 4}
                     onChange={(e) => setServerConfig({ ...serverConfig, maxConcurrentProjects: Number(e.target.value) })}
+                    className="w-full accent-indigo-500 h-2 bg-slate-800 rounded-lg cursor-pointer"
+                  />
+                  <span className="text-xs font-mono text-slate-300 shrink-0">۱ تا ۱۶ فایل</span>
+                </div>
+              </div>
+
+              {/* Concurrency: maxTotalParallelKeys (Active Key Threads) */}
+              <div>
+                <label className="text-xs text-slate-300 font-semibold flex items-center justify-between mb-1">
+                  <span className="flex items-center gap-1.5">
+                    <Key className="w-3.5 h-3.5 text-amber-400" />
+                    <span>تعداد کلیدهای فعال همزمان در استخر (Parallel Key Threads):</span>
+                  </span>
+                  <span className="text-xs font-mono font-bold text-amber-300 px-2.5 py-0.5 rounded bg-slate-950 border border-slate-800">
+                    {serverConfig.maxTotalParallelKeys || 8} کلید
+                  </span>
+                </label>
+                <div className="flex items-center gap-4">
+                  <input
+                    type="range"
+                    min={1}
+                    max={32}
+                    step={1}
+                    value={serverConfig.maxTotalParallelKeys || 8}
+                    onChange={(e) => setServerConfig({ ...serverConfig, maxTotalParallelKeys: Number(e.target.value) })}
                     className="w-full accent-amber-500 h-2 bg-slate-800 rounded-lg cursor-pointer"
                   />
-                  <span className="text-xs font-mono text-slate-300 shrink-0">۱ تا ۱۶</span>
+                  <span className="text-xs font-mono text-slate-300 shrink-0">۱ تا ۳۲ کلید</span>
                 </div>
-                <p className="text-[11px] text-slate-400 mt-1 leading-relaxed">
-                  موتور ترجمه پس‌زمینه به تعداد این عدد، فایل‌ها و تکه‌های زیرنویس را با <span className="text-amber-300 font-bold">کلیدهای مجزا به طور کاملاً موازی</span> ترجمه می‌کند تا حداکثر سرعت کسب شود.
-                </p>
               </div>
+
+              {/* Live Formula Preview Card */}
+              {(() => {
+                const f = serverConfig.maxConcurrentProjects || 4;
+                const k = serverConfig.maxTotalParallelKeys || 8;
+                const perFile = Math.max(1, Math.floor(k / f));
+                const cuesPerCall = perFile * 50;
+
+                return (
+                  <div className="bg-gradient-to-r from-indigo-950/40 via-slate-950 to-amber-950/30 border border-indigo-500/30 rounded-xl p-3 text-xs flex flex-col gap-1.5">
+                    <div className="flex items-center gap-2 font-bold text-amber-300">
+                      <Zap className="w-3.5 h-3.5 text-amber-400" />
+                      <span>فرمول تخصیص موازی کلیدها به هر فایل:</span>
+                    </div>
+                    <p className="text-slate-300 text-[11px] leading-relaxed">
+                      با تنظیم <span className="text-white font-bold">{f} فایل</span> و <span className="text-amber-300 font-bold">{k} کلید</span>، روی هر فایل به طور خودکار <span className="text-emerald-300 font-bold font-mono">{perFile} کلید موازی</span> کار می‌کنند و در هر چرخه درخواست هوش مصنوعی، <span className="text-emerald-300 font-bold font-mono">{cuesPerCall} سطر</span> ترجمه می‌شوند.
+                    </p>
+                    <p className="text-[10px] text-slate-400">
+                      تمامی سطرها دقیقاً با شماره ID و تایم‌کد اختصاصی در جای اصلی خود قرار می‌گیرند و هیچ‌گونه جابجایی رخ نمی‌دهد.
+                    </p>
+                  </div>
+                );
+              })()}
 
               <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-800">
                 <button

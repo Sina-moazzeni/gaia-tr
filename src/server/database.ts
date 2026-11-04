@@ -47,7 +47,8 @@ export interface ServerSubtitleProject {
 export interface ServerConfig {
   allowedOrigin: string; // default '*'
   geminiBaseUrl: string; // default 'https://generativelanguage.googleapis.com'
-  maxConcurrentProjects: number; // default 2
+  maxConcurrentProjects: number; // default 4 (Active files concurrently translating)
+  maxTotalParallelKeys?: number; // default 8 (Total parallel key workers across files)
 }
 
 export interface KeyUsageRecord {
@@ -89,7 +90,8 @@ function ensureDataDir() {
 const DEFAULT_SERVER_CONFIG: ServerConfig = {
   allowedOrigin: process.env.ALLOWED_ORIGIN?.trim() || '*',
   geminiBaseUrl: process.env.GEMINI_BASE_URL?.trim() || 'https://generativelanguage.googleapis.com',
-  maxConcurrentProjects: Number(process.env.MAX_CONCURRENT_PROJECTS) || 8,
+  maxConcurrentProjects: Number(process.env.MAX_CONCURRENT_PROJECTS) || 4,
+  maxTotalParallelKeys: Number(process.env.MAX_PARALLEL_KEYS) || 8,
 };
 
 function loadDatabaseFromDisk(): SubtitlesDatabase {
@@ -460,6 +462,9 @@ export function getServerConfig(): ServerConfig {
     db.serverConfig = { ...DEFAULT_SERVER_CONFIG };
     saveDatabaseSync();
   }
+  if (!db.serverConfig.maxTotalParallelKeys) {
+    db.serverConfig.maxTotalParallelKeys = 8;
+  }
   return db.serverConfig;
 }
 
@@ -476,7 +481,11 @@ export function updateServerConfig(updates: Partial<ServerConfig>): ServerConfig
   }
   if (updates.maxConcurrentProjects !== undefined) {
     const val = Number(updates.maxConcurrentProjects);
-    db.serverConfig.maxConcurrentProjects = Math.max(1, Math.min(val || 8, 24));
+    db.serverConfig.maxConcurrentProjects = Math.max(1, Math.min(val || 4, 16));
+  }
+  if (updates.maxTotalParallelKeys !== undefined) {
+    const val = Number(updates.maxTotalParallelKeys);
+    db.serverConfig.maxTotalParallelKeys = Math.max(1, Math.min(val || 8, 32));
   }
   saveDatabaseSync();
   return db.serverConfig;

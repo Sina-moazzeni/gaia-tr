@@ -198,6 +198,8 @@ export interface WorkerStatus {
   isRunning: boolean;
   activeProjectCount: number;
   maxConcurrentProjects: number;
+  maxTotalParallelKeys: number;
+  inFlightKeyThreads: number;
   activeProjects: ActiveProjectSummary[];
   // Backwards compatibility single-project properties
   activeProjectId: string | null;
@@ -250,7 +252,9 @@ export function getWorkerStatus(): WorkerStatus {
   return {
     isRunning: Boolean(workerInterval),
     activeProjectCount: translatingProjects.length,
-    maxConcurrentProjects: config.maxConcurrentProjects || 8,
+    maxConcurrentProjects: config.maxConcurrentProjects || 4,
+    maxTotalParallelKeys: config.maxTotalParallelKeys || 8,
+    inFlightKeyThreads: busyKeys.size,
     activeProjects: activeProjectsSummaries,
     activeProjectId: firstActive ? firstActive.id : (queuedProject ? queuedProject.id : null),
     activeProjectName: firstActive ? firstActive.name : (queuedProject ? queuedProject.name : null),
@@ -869,11 +873,13 @@ async function processTick(): Promise<void> {
     return;
   }
 
-  const maxWorkers = Math.max(1, Math.min(config.maxConcurrentProjects || 8, Math.max(1, allKeys.length)));
+  const maxActiveFiles = Math.max(1, Math.min(config.maxConcurrentProjects || 4, 16));
+  const maxTotalKeys = Math.max(1, Math.min(config.maxTotalParallelKeys || 8, 32));
+  const maxKeyThreads = Math.min(maxTotalKeys, Math.max(1, allKeys.length));
 
-  // Check how many worker slots are open
-  let availableSlots = maxWorkers - busyKeys.size;
-  if (availableSlots <= 0) return;
+  // Check how many worker key slots are open
+  let availableKeySlots = maxKeyThreads - busyKeys.size;
+  if (availableKeySlots <= 0) return;
 
   // Find candidate projects needing work:
   // 1. Projects already marked 'translating'
@@ -902,9 +908,45 @@ async function processTick(): Promise<void> {
     return untranslatedA - untranslatedB;
   });
 
-  // Dispatch parallel chunks across candidate projects
-  for (const project of candidateProjects) {
-    if (availableSlots <= 0) break;
+  // Track which files currently have in-flight cues
+  const activeInFlightProjectIds = new Set<string>();
+  inFlightCueKeys.forEach((k) => {
+    const pId = k.substring(0, k.indexOf('_'));
+    if (pId) activeInFlightProjectIds.add(pId);
+  });
+
+  // Select the working set of files (strictly constrained to maxActiveFiles):
+  // 1. First keep files that already have work in flight so they don't stall
+  // 2. Next fill up to maxActiveFiles from the sorted candidates (incomplete files prioritized by SRJF)
+  const activeWorkingProjects: ServerSubtitleProject[] = [];
+  const selectedProjectIds = new Set<string>();
+
+  for (const pId of activeInFlightProjectIds) {
+    const proj = db.projects.find((p) => p.id === pId);
+    if (proj && proj.status !== 'completed' && proj.status !== 'paused') {
+      activeWorkingProjects.push(proj);
+      selectedProjectIds.add(proj.id);
+    }
+  }
+
+  for (const proj of candidateProjects) {
+    if (activeWorkingProjects.length >= maxActiveFiles) break;
+    if (!selectedProjectIds.has(proj.id)) {
+      activeWorkingProjects.push(proj);
+      selectedProjectIds.add(proj.id);
+    }
+  }
+
+  if (activeWorkingProjects.length === 0) return;
+
+  // Distribute parallel key threads among active files:
+  // e.g. 4 files with 8 keys = 2 parallel keys per file (100 cues per cycle!)
+  // e.g. 4 files with 12 keys = 3 parallel keys per file (150 cues per cycle!)
+  const targetKeysPerFile = Math.max(1, Math.ceil(maxKeyThreads / activeWorkingProjects.length));
+
+  // Dispatch parallel chunks across the active files
+  for (const project of activeWorkingProjects) {
+    if (availableKeySlots <= 0) break;
 
     const untranslatedCues = project.items.filter(
       (item) => !isCueProperlyTranslated(item.originalText, item.translatedText, project.targetLanguage)
@@ -928,19 +970,26 @@ async function processTick(): Promise<void> {
       continue;
     }
 
-    // Allocate parallel chunks to this project
-    const maxChunksForProject = candidateProjects.length === 1
-      ? availableSlots
-      : Math.max(1, Math.min(availableSlots, Math.ceil(availableSlots / candidateProjects.length)));
+    // Check how many chunks this project already has in flight
+    const currentProjectInFlightCount = Array.from(inFlightCueKeys).filter((k) => k.startsWith(project.id + '_')).length;
+    const currentInFlightBatches = Math.ceil(currentProjectInFlightCount / BATCH_SIZE);
+
+    // Allow this project to take up to targetKeysPerFile batches (or more if remaining keys are idle)
+    const allowedNewBatches = Math.max(1, targetKeysPerFile - currentInFlightBatches);
+    const maxBatchesForThisPass = Math.min(
+      Math.ceil(availableCues.length / BATCH_SIZE),
+      availableKeySlots,
+      allowedNewBatches
+    );
 
     let chunksDispatched = 0;
-    while (availableCues.length > 0 && availableSlots > 0 && chunksDispatched < maxChunksForProject) {
+    while (availableCues.length > 0 && availableKeySlots > 0 && chunksDispatched < maxBatchesForThisPass) {
       const keyInfo = leaseAvailableKey(Array.from(busyKeys));
       if (!keyInfo) break; // No more available idle keys
 
       const leasedKey = keyInfo.key;
       busyKeys.add(leasedKey);
-      availableSlots--;
+      availableKeySlots--;
       chunksDispatched++;
 
       const chunkCues = availableCues.splice(0, BATCH_SIZE);

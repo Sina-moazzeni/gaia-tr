@@ -2735,8 +2735,8 @@ app.get('/api/server/config', (req, res) => {
 
 app.post('/api/server/config', (req, res) => {
   try {
-    const { allowedOrigin, geminiBaseUrl, maxConcurrentProjects } = req.body || {};
-    const updated = updateServerConfig({ allowedOrigin, geminiBaseUrl, maxConcurrentProjects });
+    const { allowedOrigin, geminiBaseUrl, maxConcurrentProjects, maxTotalParallelKeys } = req.body || {};
+    const updated = updateServerConfig({ allowedOrigin, geminiBaseUrl, maxConcurrentProjects, maxTotalParallelKeys });
     return res.json({ success: true, config: updated, message: 'تنظیمات سرور با موفقیت به‌روزرسانی شد.' });
   } catch (err: any) {
     return res.status(500).json({ success: false, error: err?.message });
