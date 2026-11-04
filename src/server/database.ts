@@ -589,11 +589,24 @@ export function deleteSingleServerKey(index: number): string[] {
   return getServerKeys();
 }
 
+export type KeyExhaustionType = 'minute' | 'daily';
+
+export interface ExhaustionEntry {
+  timestamp: number;
+  reason: string;
+  type: KeyExhaustionType;
+  cooldownMs: number;
+}
+
 export interface ServerKeyDetail {
   index: number;
   rawKey: string;
   maskedKey: string;
   isExhausted: boolean;
+  isDailyExhausted: boolean;
+  isMinuteExhausted: boolean;
+  exhaustionType?: KeyExhaustionType;
+  exhaustionReason?: string;
   cooldownRemainingSec: number;
   isDisabled: boolean;
   disabledReason?: string;
@@ -646,6 +659,116 @@ export function clearAllDisabledKeys(): void {
   disabledKeysMap.clear();
 }
 
+// ─── Key Exhaustion & Cooldown Tracking ──────────────────────────────────────
+
+export const exhaustedKeysMap = new Map<string, ExhaustionEntry>();
+const MINUTE_COOLDOWN_MS = 45 * 1000; // 45 seconds rolling minute rate limit (RPM)
+const DAILY_COOLDOWN_MS = 14 * 60 * 60 * 1000; // 14 hours for daily quota limit (RPD)
+
+export function isDailyQuotaError(errorMessage: string): boolean {
+  if (!errorMessage) return false;
+  const lower = String(errorMessage).toLowerCase();
+  return (
+    lower.includes('requests per day') ||
+    lower.includes('requests_per_day') ||
+    lower.includes('per-day') ||
+    lower.includes('per day') ||
+    lower.includes('daily') ||
+    lower.includes('perday') ||
+    lower.includes('daily limit') ||
+    (lower.includes('quota exceeded for quota metric') && lower.includes('day')) ||
+    (lower.includes('resource_exhausted') && lower.includes('day'))
+  );
+}
+
+export function markKeyAsExhausted(key: string, reason: string = 'Quota exhausted (429)', isDaily?: boolean): void {
+  const isDailyLimit = isDaily !== undefined ? isDaily : isDailyQuotaError(reason);
+  const type: KeyExhaustionType = isDailyLimit ? 'daily' : 'minute';
+  const cooldownMs = isDailyLimit ? DAILY_COOLDOWN_MS : MINUTE_COOLDOWN_MS;
+
+  exhaustedKeysMap.set(key, {
+    timestamp: Date.now(),
+    reason,
+    type,
+    cooldownMs,
+  });
+
+  if (isDailyLimit) {
+    console.warn(`[KeyPool] 🔴 DAILY QUOTA EXHAUSTED for key ${key.slice(0, 6)}... (${reason}). STRICTLY EXCLUDED from rotation pool for 14 hours.`);
+  } else {
+    console.log(`[KeyPool] 🟡 Key ${key.slice(0, 6)}... hit temporary RPM limit (${reason}). Short cooldown (${cooldownMs / 1000}s).`);
+  }
+
+  // FIFO Queue Rotation: Immediately move the exhausted key to the END of db.serverKeys
+  // so fresh, unexhausted keys are immediately at index 0 and picked up without delay!
+  try {
+    const db = getDatabase();
+    if (Array.isArray(db.serverKeys) && db.serverKeys.includes(key) && db.serverKeys.length > 1) {
+      db.serverKeys = db.serverKeys.filter((k) => k !== key);
+      db.serverKeys.push(key);
+      if (db.activeKeyIndex >= db.serverKeys.length) {
+        db.activeKeyIndex = 0;
+      }
+      saveDatabaseSync();
+    }
+  } catch {}
+}
+
+export function isKeyExhausted(key: string): boolean {
+  if (isKeyDisabled(key)) return true;
+  const entry = exhaustedKeysMap.get(key);
+  if (!entry) return false;
+  if (Date.now() - entry.timestamp > entry.cooldownMs) {
+    exhaustedKeysMap.delete(key);
+    return false;
+  }
+  return true;
+}
+
+export function isKeyDailyExhausted(key: string): boolean {
+  if (isKeyDisabled(key)) return false;
+  const entry = exhaustedKeysMap.get(key);
+  if (!entry || entry.type !== 'daily') return false;
+  if (Date.now() - entry.timestamp > entry.cooldownMs) {
+    exhaustedKeysMap.delete(key);
+    return false;
+  }
+  return true;
+}
+
+export function getDailyExhaustedKeysList(): string[] {
+  return Array.from(exhaustedKeysMap.entries())
+    .filter(([k, v]) => v.type === 'daily' && Date.now() - v.timestamp <= v.cooldownMs && !isKeyDisabled(k))
+    .map(([k]) => k);
+}
+
+export function getMinuteExhaustedKeysList(): string[] {
+  return Array.from(exhaustedKeysMap.entries())
+    .filter(([k, v]) => v.type === 'minute' && Date.now() - v.timestamp <= v.cooldownMs && !isKeyDisabled(k))
+    .map(([k]) => k);
+}
+
+export function getExhaustedKeysList(): string[] {
+  return Array.from(exhaustedKeysMap.keys()).filter((k) => !isKeyDisabled(k));
+}
+
+export function resetKeyCooldown(key: string): void {
+  exhaustedKeysMap.delete(key);
+}
+
+export function resetAllKeyCooldowns(includeDaily = true): void {
+  if (includeDaily) {
+    exhaustedKeysMap.clear();
+  } else {
+    for (const [k, v] of Array.from(exhaustedKeysMap.entries())) {
+      if (v.type === 'minute') {
+        exhaustedKeysMap.delete(k);
+      }
+    }
+  }
+  console.log('[KeyPool] All key cooldowns have been manually reset.');
+}
+
 export function getServerKeysWithDetails(): ServerKeyDetail[] {
   const allKeys = getServerKeys();
   const db = getDatabase();
@@ -654,8 +777,10 @@ export function getServerKeysWithDetails(): ServerKeyDetail[] {
 
   return allKeys.map((k, index) => {
     const entry = exhaustedKeysMap.get(k);
-    const isExhausted = entry ? (now - entry.timestamp <= KEY_EXHAUSTION_COOLDOWN_MS) : false;
-    const cooldownRemainingSec = entry && isExhausted ? Math.max(0, Math.ceil((KEY_EXHAUSTION_COOLDOWN_MS - (now - entry.timestamp)) / 1000)) : 0;
+    const isExhausted = entry ? (now - entry.timestamp <= entry.cooldownMs) : false;
+    const isDailyExhausted = Boolean(isExhausted && entry?.type === 'daily');
+    const isMinuteExhausted = Boolean(isExhausted && entry?.type === 'minute');
+    const cooldownRemainingSec = entry && isExhausted ? Math.max(0, Math.ceil((entry.cooldownMs - (now - entry.timestamp)) / 1000)) : 0;
     const disabledEntry = disabledKeysMap.get(k);
     const isDisabled = Boolean(disabledEntry);
     const disabledReason = disabledEntry?.reason;
@@ -669,6 +794,10 @@ export function getServerKeysWithDetails(): ServerKeyDetail[] {
       rawKey: k,
       maskedKey,
       isExhausted,
+      isDailyExhausted,
+      isMinuteExhausted,
+      exhaustionType: entry?.type,
+      exhaustionReason: entry?.reason,
       cooldownRemainingSec,
       isDisabled,
       disabledReason,
@@ -695,53 +824,49 @@ export function rotateActiveKeyIndex(): number {
   return db.activeKeyIndex;
 }
 
-// ─── Key Exhaustion & Cooldown Tracking ──────────────────────────────────────
-
-export const exhaustedKeysMap = new Map<string, { timestamp: number; reason: string }>();
-// Fast 15 seconds cooldown (Gemini rolling window resets quickly within 10-15s)
-const KEY_EXHAUSTION_COOLDOWN_MS = 15 * 1000;
-
-export function markKeyAsExhausted(key: string, reason: string = 'Quota exhausted (429)'): void {
-  exhaustedKeysMap.set(key, { timestamp: Date.now(), reason });
-  console.log(`[KeyPool] Key ${key.slice(0, 6)}... quota limit reached (${reason}). Moved to END of pool (cooldown: 35s).`);
-
-  // FIFO Queue Rotation: Immediately move the exhausted key to the END of db.serverKeys
-  // so fresh, unexhausted keys are immediately at index 0 and picked up without delay!
-  try {
-    const db = getDatabase();
-    if (Array.isArray(db.serverKeys) && db.serverKeys.includes(key) && db.serverKeys.length > 1) {
-      db.serverKeys = db.serverKeys.filter((k) => k !== key);
-      db.serverKeys.push(key);
-      if (db.activeKeyIndex >= db.serverKeys.length) {
-        db.activeKeyIndex = 0;
-      }
-      saveDatabaseSync();
-    }
-  } catch {}
-}
-
-export function isKeyExhausted(key: string): boolean {
-  if (isKeyDisabled(key)) return true;
-  const entry = exhaustedKeysMap.get(key);
-  if (!entry) return false;
-  if (Date.now() - entry.timestamp > KEY_EXHAUSTION_COOLDOWN_MS) {
-    exhaustedKeysMap.delete(key);
-    return false;
-  }
-  return true;
-}
-
-export function getExhaustedKeysList(): string[] {
-  return Array.from(exhaustedKeysMap.keys()).filter((k) => !isKeyDisabled(k));
-}
-
-export function resetKeyCooldown(key: string): void {
-  exhaustedKeysMap.delete(key);
-}
-
-export function resetAllKeyCooldowns(): void {
+/**
+ * Safely clears cache, key exhaustion cooldowns, and resets stuck queues
+ * WITHOUT deleting any folders, projects, or translated subtitle cues!
+ */
+export function clearSystemCacheAndResetStuckQueues(): {
+  clearedCooldownsCount: number;
+  requeuedProjectsCount: number;
+  preservedSubtitlesCount: number;
+} {
+  const cooldownsCount = exhaustedKeysMap.size;
   exhaustedKeysMap.clear();
-  console.log('[KeyPool] All key cooldowns have been manually reset.');
+
+  const db = getDatabase();
+  let requeuedCount = 0;
+  let preservedCount = 0;
+
+  db.projects.forEach((p) => {
+    // Count preserved translated items (100% safeguarded)
+    const translatedCount = (p.items || []).filter((item) => Boolean(item.translatedText && item.translatedText.trim())).length;
+    preservedCount += translatedCount;
+
+    // If project is incomplete or paused or error, re-queue it cleanly
+    const isCompleted = p.status === 'completed' || (p.totalCues > 0 && p.translatedCues >= p.totalCues);
+    if (!isCompleted) {
+      p.status = 'queued';
+      p.lastError = undefined;
+      p.errorMessage = undefined;
+      p.failedCueIds = [];
+      p.hasDisruption = false;
+      requeuedCount++;
+    } else {
+      p.lastError = undefined;
+      p.errorMessage = undefined;
+    }
+  });
+
+  saveDatabaseSync();
+  console.log(`[CacheClear] Cleared ${cooldownsCount} key cooldowns. Re-queued ${requeuedCount} projects. Preserved ${preservedCount} translated subtitle cues!`);
+  return {
+    clearedCooldownsCount: cooldownsCount,
+    requeuedProjectsCount: requeuedCount,
+    preservedSubtitlesCount: preservedCount,
+  };
 }
 
 export function recordKeyUsage(
@@ -817,8 +942,8 @@ export function getKeyExhaustionStatus(): Array<{ keyMasked: string; isExhausted
   const now = Date.now();
   return allKeys.map((k) => {
     const entry = exhaustedKeysMap.get(k);
-    const isExhausted = entry ? (now - entry.timestamp <= KEY_EXHAUSTION_COOLDOWN_MS) : false;
-    const cooldownRemainingSec = entry && isExhausted ? Math.max(0, Math.ceil((KEY_EXHAUSTION_COOLDOWN_MS - (now - entry.timestamp)) / 1000)) : 0;
+    const isExhausted = entry ? (now - entry.timestamp <= entry.cooldownMs) : false;
+    const cooldownRemainingSec = entry && isExhausted ? Math.max(0, Math.ceil((entry.cooldownMs - (now - entry.timestamp)) / 1000)) : 0;
     const len = k.length;
     const keyMasked = len > 8 ? k.substring(0, 4) + '...' + k.substring(len - 4) : '****';
     return { keyMasked, isExhausted, cooldownRemainingSec };

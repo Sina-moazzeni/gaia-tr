@@ -38,10 +38,10 @@ export const ModelGuideModal: React.FC<ModelGuideModalProps> = ({
         return <Radio className="w-5 h-5 text-rose-500 animate-pulse" />;
       case 'gemini-3.1-pro-preview':
       case 'gemini-3.1-pro':
-      case 'gemini-2.5-pro':
         return <BrainCircuit className="w-5 h-5 text-purple-500" />;
       case 'gemini-3.8-flash':
         return <Sparkles className="w-5 h-5 text-emerald-500" />;
+      case 'gemini-flash-latest':
       case 'gemini-3.7-flash':
         return <Zap className="w-5 h-5 text-teal-500" />;
       case 'gemini-3.1-flash-lite':
@@ -69,7 +69,6 @@ export const ModelGuideModal: React.FC<ModelGuideModalProps> = ({
         };
       case 'gemini-3.1-pro-preview':
       case 'gemini-3.1-pro':
-      case 'gemini-2.5-pro':
         return {
           categoryFa: 'استدلال پیشرفته و محتوای عمیق (Deep Reasoning)',
           categoryEn: 'High-Reasoning & Complex Lore',

@@ -11,6 +11,9 @@ import {
   leaseAvailableKey,
   markKeyAsExhausted,
   isKeyExhausted,
+  isKeyDailyExhausted,
+  getDailyExhaustedKeysList,
+  getMinuteExhaustedKeysList,
   markKeyAsDisabled,
   isKeyDisabled,
   resetKeyCooldown,
@@ -23,16 +26,19 @@ import {
   recordKeyUsage,
   retryDisruptedAndIncompleteProjects,
   setProjectPriority,
+  clearSystemCacheAndResetStuckQueues,
+  isDailyQuotaError,
   ServerSubtitleProject 
 } from './database';
 import { isCueProperlyTranslated } from '../lib/subtitleParser';
 import { SubtitleItem } from '../types';
 
 // Primary & Fallback Models hierarchy:
-// Official Google Gemini 3.1 Flash Lite as primary ultra-speed engine, with Gemini 2.5 Flash, Flash Latest, and 3.8 as fallbacks.
+// Strictly Gemini 3 series ONLY. NO series 2 models!
+// Official Google Gemini 3.1 Flash Lite as primary ultra-speed engine, with Gemini Flash Latest and Gemini 3.8 Flash as fallbacks.
 export const PRIMARY_MODEL = 'gemini-3.1-flash-lite';
 export const FALLBACK_MODELS = [
-  'gemini-2.5-flash',
+  'gemini-3.1-flash-lite',
   'gemini-flash-latest',
   'gemini-3.8-flash'
 ];
@@ -274,6 +280,9 @@ export interface WorkerStatus {
   totalKeys: number;
   activeKeys: number;
   exhaustedKeys: number;
+  dailyExhaustedKeys: number;
+  minuteExhaustedKeys: number;
+  stuckReason?: string;
   lastMessage: string;
   currentModel: string;
   fallbackActive: boolean;
@@ -314,7 +323,9 @@ export function getWorkerStatus(): WorkerStatus {
   const firstActive = translatingProjects[0];
   const queuedProject = db.projects.find((p) => p.status === 'queued');
 
-  const exhaustedCount = allKeys.filter((k) => isKeyExhausted(k)).length;
+  const dailyExhaustedCount = allKeys.filter((k) => isKeyDailyExhausted(k)).length;
+  const minuteExhaustedCount = allKeys.filter((k) => isKeyExhausted(k) && !isKeyDailyExhausted(k)).length;
+  const exhaustedCount = dailyExhaustedCount + minuteExhaustedCount;
   const activeKeysCount = Math.max(0, allKeys.length - exhaustedCount);
   const reserveKeysCount = Math.max(0, activeKeysCount - busyKeys.size);
 
@@ -331,6 +342,20 @@ export function getWorkerStatus(): WorkerStatus {
     const rem = (p.items || []).filter((i) => !i.translatedText || !i.translatedText.trim()).length;
     return rem > 0;
   }).length;
+
+  // Determine diagnostic reason if progress is stalled:
+  let stuckReason: string | undefined = undefined;
+  if (allKeys.length === 0) {
+    stuckReason = 'هیچ کلید API در استخر سرور ثبت نشده است. لطفاً در بخش کلیدهای سرور، کلید Gemini وارد کنید.';
+  } else if (activeKeysCount === 0 && incompleteProjectCount > 0) {
+    if (dailyExhaustedCount >= allKeys.length) {
+      stuckReason = `تمامی ${allKeys.length} کلید استخر، سهمیه روزانه (Daily Quota) خود را تمام کرده‌اند و تا فردا یا افزودن کلید جدید امکان ترجمه ندارند.`;
+    } else if (dailyExhaustedCount > 0) {
+      stuckReason = `${dailyExhaustedCount} کلید سهمیه روزانه را تمام کرده‌اند و مابقی ${minuteExhaustedCount} کلید در استراحت موقت دقیقه (RPM) هستند.`;
+    } else {
+      stuckReason = 'تمامی کلیدها موقتاً به سقف درخواست در دقیقه (RPM) رسیده‌اند و در استراحت کوتاه ۴۵ ثانیه‌ای هستند.';
+    }
+  }
 
   const firstActiveComplete = firstActive && (firstActive.status === 'completed' || firstActive.translatedCues >= firstActive.totalCues);
   const firstActivePct = firstActive && firstActive.totalCues > 0 
@@ -358,6 +383,9 @@ export function getWorkerStatus(): WorkerStatus {
     totalKeys: allKeys.length,
     activeKeys: activeKeysCount,
     exhaustedKeys: exhaustedCount,
+    dailyExhaustedKeys: dailyExhaustedCount,
+    minuteExhaustedKeys: minuteExhaustedCount,
+    stuckReason,
     lastMessage: lastWorkerStatusMessage,
     currentModel: activeTranslationModel,
     fallbackActive: fallbackModelActivated,
@@ -397,15 +425,15 @@ export async function testServerKey(apiKey: string): Promise<{
   message: string;
   error?: string;
   modelUsed?: string;
+  isDailyExhausted?: boolean;
 }> {
   const cleanKey = apiKey.trim();
   if (!cleanKey) {
     return { success: false, latencyMs: 0, message: 'کلید API خالی است.' };
   }
 
-  const modelsToTry = [activeTranslationModel, PRIMARY_MODEL, ...FALLBACK_MODELS].filter(
-    (m, i, arr) => arr.indexOf(m) === i
-  );
+  // Strictly Gemini 3 series: gemini-3.1-flash-lite as primary
+  const modelsToTry = [PRIMARY_MODEL, 'gemini-flash-latest', 'gemini-3.8-flash'];
 
   const start = Date.now();
   let lastErr: any = null;
@@ -415,7 +443,7 @@ export async function testServerKey(apiKey: string): Promise<{
       const ai = createGenAI(cleanKey);
       const res = await ai.models.generateContent({
         model: modelCandidate,
-        contents: 'Ping',
+        contents: 'سلام',
         config: {
           maxOutputTokens: 5,
         },
@@ -423,24 +451,36 @@ export async function testServerKey(apiKey: string): Promise<{
 
       const latencyMs = Date.now() - start;
       if (res.text !== undefined) {
+        // Successful verification! If this key had been marked exhausted, unmark it now
+        resetKeyCooldown(cleanKey);
+        resetWorkerExhaustionBackoff();
+
         const isFallback = modelCandidate !== PRIMARY_MODEL;
         const msg = isFallback
-          ? `اتصال موفق و کلید معتبر است (مدل اصلی ۳.۵ خطای ۵۰۳ موقت داشت، اتصال پایدار با مدل کمکی Gemini 3.1 Flash Lite در ${latencyMs}ms برقرار شد).`
-          : `اتصال موفق و کلید معتبر است (پاسخ در ${latencyMs}ms با مدل اصلی Gemini 3.5 Flash Lite).`;
+          ? `اتصال موفق و کلید معتبر است (پاسخ در ${latencyMs}ms با مدل کمکی ${modelCandidate}).`
+          : `اتصال موفق و کلید کاملاً معتبر است (پاسخ در ${latencyMs}ms با مدل رسمی Gemini 3.1 Flash Lite).`;
 
         return {
           success: true,
           latencyMs,
           message: msg,
           modelUsed: modelCandidate,
+          isDailyExhausted: false,
         };
       }
     } catch (err: any) {
       lastErr = err;
       const errMsg = String(err?.message || err);
-      // If error is 503 High Demand, cascade to next fallback model immediately
-      if (errMsg.includes('503') || errMsg.toLowerCase().includes('high demand') || errMsg.toLowerCase().includes('unavailable')) {
-        console.warn(`[KeyTest] Model ${modelCandidate} returned 503 High Demand. Cascading to next model...`);
+      // If error is 503 High Demand, 404 or unavailable, cascade to next fallback model immediately
+      if (
+        errMsg.includes('503') ||
+        errMsg.includes('404') ||
+        errMsg.toLowerCase().includes('high demand') ||
+        errMsg.toLowerCase().includes('unavailable') ||
+        errMsg.toLowerCase().includes('not found') ||
+        errMsg.toLowerCase().includes('no longer available')
+      ) {
+        console.warn(`[KeyTest] Model ${modelCandidate} returned error (${errMsg.slice(0, 80)}). Cascading to next model...`);
         continue;
       }
       // If auth error or 429 quota error, do not retry other models on this key
@@ -451,6 +491,8 @@ export async function testServerKey(apiKey: string): Promise<{
   const latencyMs = Date.now() - start;
   const msg = String(lastErr?.message || lastErr);
   let userMsg = `خطا در تست کلید: ${msg}`;
+  const isDaily = isDailyQuotaError(msg);
+
   const isDeletedOrDisabled =
     msg.includes('401') ||
     msg.toLowerCase().includes('deleted or disabled') ||
@@ -459,13 +501,17 @@ export async function testServerKey(apiKey: string): Promise<{
 
   if (isDeletedOrDisabled) {
     markKeyAsDisabled(cleanKey, 'سرویس‌اکانت یا کلید در گوگل غیرفعال/حذف شده (401)');
-    userMsg = '❌ این کلید یا سرویس‌اکانت در گوگل غیرفعال یا حذف شده است (The bound service account is deleted or disabled) و به طور خودکار از استخر فعال خارج شد.';
+    userMsg = '❌ این کلید یا سرویس‌اکانت در گوگل غیرفعال یا حذف شده است (401) و خودکار از استخر فعال خارج شد.';
+  } else if (isDaily) {
+    markKeyAsExhausted(cleanKey, `اتمام سهمیه روزانه: ${msg}`, true);
+    userMsg = '🔴 سهمیه روزانه (Daily Quota / Requests Per Day) این کلید به اتمام رسیده است و تا ریست روزانه گوگل از چرخه ترجمه خارج شد تا مانع پیشرفت کار نشود.';
   } else if (msg.includes('429') || msg.toLowerCase().includes('quota') || msg.toLowerCase().includes('resource_exhausted')) {
-    userMsg = 'سهمیه این کلید موقتاً به اتمام رسیده است (429 Quota Exhausted). سرور از کلید بعدی استفاده خواهد کرد.';
+    markKeyAsExhausted(cleanKey, `محدودیت موقت دقیقه: ${msg}`, false);
+    userMsg = '🟡 سقف درخواست در دقیقه (RPM) این کلید موقتاً پر شده است. در استراحت کوتاه ۴۵ ثانیه‌ای قرار گرفت.';
   } else if (msg.includes('403') || msg.toLowerCase().includes('invalid api key')) {
     userMsg = 'کلید API نامعتبر است (Authentication / API Key Invalid). لطفاً از صحت کلید اطمینان حاصل فرمایید.';
   } else if (msg.includes('503') || msg.toLowerCase().includes('high demand')) {
-    userMsg = 'سرورهای جمینای گوگل در حال حاضر با بار ترافیکی مقطعی روبرو هستند (503 High Demand). سیستم خودکار به مدل کمکی سوییچ خواهد کرد.';
+    userMsg = 'سرورهای جمینای گوگل با ترافیک مقطعی روبرو هستند (503). اتصال در تلاش بعدی بازیابی می‌شود.';
   }
 
   return {
@@ -473,6 +519,7 @@ export async function testServerKey(apiKey: string): Promise<{
     latencyMs,
     message: userMsg,
     error: msg,
+    isDailyExhausted: isDaily,
   };
 }
 
@@ -733,8 +780,14 @@ export async function translateBatchWithDedicatedKey(
           }
           break;
         } else if (isRateLimit || isOtherAuth) {
-          markKeyAsExhausted(currentKey, isRateLimit ? 'اتمام توکن/سهمیه (429)' : 'عدم دسترسی (403)');
-          console.warn(`[BackgroundWorker] Key ${currentKey.slice(0, 6)}... quota limit hit (429). Shifted to pool back. Substituting fresh key immediately...`);
+          const isDaily = isDailyQuotaError(msg);
+          if (isDaily) {
+            markKeyAsExhausted(currentKey, `اتمام سهمیه روزانه گوگل (Daily Quota): ${msg.slice(0, 100)}`, true);
+            console.warn(`[BackgroundWorker] Key ${currentKey.slice(0, 6)}... DAILY QUOTA EXHAUSTED. Strictly excluded from rotation.`);
+          } else {
+            markKeyAsExhausted(currentKey, isRateLimit ? 'محدودیت موقت دقیقه (429 RPM)' : 'عدم دسترسی (403)', false);
+            console.warn(`[BackgroundWorker] Key ${currentKey.slice(0, 6)}... RPM limit hit (429). Shifted to pool back.`);
+          }
           keyFailedWithRateOrAuth = true;
           const freshPoolKeys = getServerKeys().filter((k) => !isKeyDisabled(k) && !isKeyExhausted(k));
           for (const fk of freshPoolKeys) {
@@ -903,7 +956,10 @@ async function processProjectChunkBatch(
       const isAllExhausted = allKeys.every((k) => isKeyExhausted(k));
       if (isAllExhausted) {
         project.status = 'queued';
-        project.lastError = 'سهمیه موقت کلیدهای سرور در حال استراحت (۱۵ ثانیه) است. ترجمه خودکار فوراً ادامه می‌یابد.';
+        const hasDaily = allKeys.some((k) => isKeyDailyExhausted(k));
+        project.lastError = hasDaily
+          ? 'سهمیه روزانه کلید(ها) به اتمام رسیده است (Daily Quota). برای ادامه، کلید جدید به استخر اضافه فرمایید.'
+          : 'سهمیه موقت دقیقه کلیدهای سرور در حال استراحت (۴۵ ثانیه) است. ترجمه خودکار به زودی ادامه می‌یابد.';
         project.errorMessage = project.lastError;
       } else {
         project.lastError = `خطا در ترجمه دسته سطرهای اخیر: ${errMsg}`;
@@ -922,7 +978,7 @@ const KEY_PROBE_INTERVAL_MS = 6000;
 
 /**
  * Background probe for exhausted keys:
- * Tests exhausted keys in the background with a minimal request.
+ * Probes ONLY keys in temporary minute cooldown (NOT daily exhausted keys).
  * If Google accepts the key, we unfreeze it immediately without waiting for cooldown!
  */
 async function probeExhaustedKeysInBackground(): Promise<void> {
@@ -930,14 +986,14 @@ async function probeExhaustedKeysInBackground(): Promise<void> {
   if (now - lastKeyProbeTime < KEY_PROBE_INTERVAL_MS) return;
   lastKeyProbeTime = now;
 
-  const exhaustedKeys = getExhaustedKeysList();
-  if (exhaustedKeys.length === 0) return;
+  const minuteKeys = getMinuteExhaustedKeysList();
+  if (minuteKeys.length === 0) return;
 
-  const testKey = exhaustedKeys[0];
+  const testKey = minuteKeys[0];
   try {
     const probeAi = createGenAI(testKey);
     await probeAi.models.generateContent({
-      model: activeTranslationModel,
+      model: PRIMARY_MODEL,
       contents: 'سلام',
       config: { maxOutputTokens: 2 },
     });
@@ -945,9 +1001,33 @@ async function probeExhaustedKeysInBackground(): Promise<void> {
     resetKeyCooldown(testKey);
     resetWorkerExhaustionBackoff();
     console.log(`[BackgroundWorker] Key ${testKey.slice(0, 6)}... passed background health probe and is restored!`);
-  } catch {
-    // Key still in quota lock
+  } catch (err: any) {
+    const msg = String(err?.message || err);
+    if (isDailyQuotaError(msg)) {
+      markKeyAsExhausted(testKey, `اتمام سهمیه روزانه: ${msg}`, true);
+    }
   }
+}
+
+/**
+ * Clear cache, cooldowns, stuck in-flight locks, and re-queue disrupted projects
+ * completely safeguarding all existing subtitle translations!
+ */
+export function clearWorkerCacheAndUnblock(): {
+  clearedCooldownsCount: number;
+  requeuedProjectsCount: number;
+  preservedSubtitlesCount: number;
+} {
+  inFlightCueKeys.clear();
+  inFlightCueTimestamps.clear();
+  busyKeys.clear();
+  busyKeyTimestamps.clear();
+  cueRetryCountMap.clear();
+  resetWorkerExhaustionBackoff();
+
+  const result = clearSystemCacheAndResetStuckQueues();
+  lastWorkerStatusMessage = `کش سرور پاکسازی شد: تمام قفل‌ها باز شدند و ${result.requeuedProjectsCount} فایل مجدداً در صف ترجمه فعال شدند (${result.preservedSubtitlesCount} سطر ترجمه با موفقیت حفظ شد).`;
+  return result;
 }
 
 /**

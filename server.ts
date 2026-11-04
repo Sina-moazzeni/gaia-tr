@@ -77,7 +77,8 @@ import {
   pauseAllTranslations,
   resumeAllTranslations,
   turboCompleteIncompleteProjects,
-  triggerEmergencyIncompleteTranslation
+  triggerEmergencyIncompleteTranslation,
+  clearWorkerCacheAndUnblock
 } from './src/server/backgroundWorker';
 
 dotenv.config();
@@ -2955,6 +2956,20 @@ app.post('/api/worker/turbo-complete', (req, res) => {
     });
   } catch (err: any) {
     return res.status(500).json({ success: false, error: err?.message || 'Failed to turbo complete' });
+  }
+});
+
+// 18e. Safe Clear Cache: Clears stuck locks, key exhaustion cooldowns, and re-queues incomplete files WITHOUT deleting subtitles
+app.post('/api/worker/clear-cache', (req, res) => {
+  try {
+    const stats = clearWorkerCacheAndUnblock();
+    return res.json({
+      success: true,
+      ...stats,
+      message: `کش و قفل‌های استخر کلید پاکسازی شد. ${stats.requeuedProjectsCount} فایل مجدداً در صف ترجمه فعال شدند و تمام ${stats.preservedSubtitlesCount} سطر ترجمه با امنیت کامل حفظ شدند.`,
+    });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message || 'Failed to clear cache' });
   }
 });
 
