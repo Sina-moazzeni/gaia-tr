@@ -1017,7 +1017,7 @@ async function processTick(): Promise<void> {
   if (availableKeySlots <= 0) return;
 
   // 2. Candidate projects needing translation (must have untranslated cues and not paused)
-  const candidateProjects = db.projects.filter((p) => {
+  let candidateProjects = db.projects.filter((p) => {
     if (p.status === 'paused') return false;
     const untranslated = p.items.filter((i) => !i.translatedText || !i.translatedText.trim());
     return untranslated.length > 0;
@@ -1025,7 +1025,35 @@ async function processTick(): Promise<void> {
 
   if (candidateProjects.length === 0) return;
 
-  // Prioritize candidates:
+  // Strict Folder Isolation (بیا پوشه‌ای عمل کنیم - تا پوشه تمام نشده اتوماتیک پوشه بعدی شروع به کار نکند):
+  // Find which folders currently have actively translating files in flight
+  const runningFolders = new Set<string>();
+  for (const cueKey of inFlightCueKeys) {
+    const pId = cueKey.split('_')[0];
+    const proj = db.projects.find((p) => p.id === pId);
+    if (proj?.folderId) runningFolders.add(proj.folderId);
+  }
+
+  if (runningFolders.size > 0) {
+    // If a folder is translating, focus ALL available keys on finishing this active folder first
+    const candidatesInActiveFolders = candidateProjects.filter((p) => runningFolders.has(p.folderId));
+    if (candidatesInActiveFolders.length > 0) {
+      candidateProjects = candidatesInActiveFolders;
+    }
+  } else {
+    // If nothing is running yet, pick the folder with the highest priority project,
+    // and concentrate all concurrent key slots on that folder until it is finished!
+    const priorityProject = candidateProjects.find((p) => p.isPriority);
+    const targetFolderId = priorityProject ? priorityProject.folderId : candidateProjects[0]?.folderId;
+    if (targetFolderId) {
+      const folderCandidates = candidateProjects.filter((p) => p.folderId === targetFolderId);
+      if (folderCandidates.length > 0) {
+        candidateProjects = folderCandidates;
+      }
+    }
+  }
+
+  // Prioritize candidates within the folder:
   // 1. Emergency Priority files first! (User clicked "ترجمه فایل‌های ناقص" or manual promote)
   // 2. Projects already partially translated with fewer remaining cues (SRJF: finish incomplete files first!)
   // 3. Queued projects

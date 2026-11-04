@@ -232,12 +232,12 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
   const [serverConfig, setServerConfig] = useState<ServerConfigData>({
     allowedOrigin: '*',
     geminiBaseUrl: 'https://generativelanguage.googleapis.com',
-    maxConcurrentProjects: 4,
+    maxConcurrentProjects: 6,
     maxTotalParallelKeys: 19,
     maxKeysPerProject: 1,
   });
   const [isSavingConfig, setIsSavingConfig] = useState(false);
-  const [customConcurrentInput, setCustomConcurrentInput] = useState<string>('4');
+  const [customConcurrentInput, setCustomConcurrentInput] = useState<string>('6');
   const [fileFilter, setFileFilter] = useState<'all' | 'incomplete' | 'translating' | 'completed' | 'disrupted'>('all');
   const [activeQueueSubTab, setActiveQueueSubTab] = useState<'translating' | 'emergency' | 'untranslated' | 'completed'>('translating');
 
@@ -1596,56 +1596,78 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
         </div>
       </div>
 
-      {/* Quick Concurrency Control Bar & Live Queue Dispatcher */}
+      {/* Concise Folder-Based Translation Manager & 6-File Concurrency Controller */}
       {(() => {
-        const files = serverConfig.maxConcurrentProjects || 4;
-        const totalKeySlots = files;
-        const liveTranslatingProjects = (allProjects || []).filter((p) => {
-          return p.status === 'translating' || workerStatus?.activeProjects?.some((ap) => ap.id === p.id);
+        const filesConcurrency = serverConfig.maxConcurrentProjects || 6;
+
+        // Determine current targeted folder: either the one we entered (activeView === 'inside_folder'),
+        // or the folder currently being processed by worker, or the first available folder.
+        const activeRunningFolderId = workerStatus?.folderId || (workerStatus?.activeProjects?.[0]?.folderId);
+        const currentFolder = activeView === 'inside_folder' && selectedFolder
+          ? selectedFolder
+          : (activeRunningFolderId ? folders.find((f) => f.id === activeRunningFolderId) : folders[0]);
+
+        // Projects belonging to this folder context
+        const currentFolderProjects = currentFolder
+          ? (activeView === 'inside_folder' ? projects : allProjects.filter((p) => p.folderId === currentFolder.id))
+          : allProjects;
+
+        // Count incomplete or untranslated files in this folder
+        const folderIncompleteOrUntranslated = currentFolderProjects.filter((p) => {
+          const isComp = p.status === 'completed' || (p.totalCues > 0 && p.translatedCues >= p.totalCues);
+          if (isComp) return false;
+          const remaining = p.totalCues > 0 ? (p.totalCues - p.translatedCues) : 0;
+          return remaining > 0;
         });
 
-        const emergencyIncompleteProjects = (allProjects || []).filter((p) => {
-          const isTranslating = p.status === 'translating' || workerStatus?.activeProjects?.some((ap) => ap.id === p.id);
-          if (isTranslating) return false;
-          const untranslated = p.totalCues > 0 ? (p.totalCues - p.translatedCues) : 0;
-          if (p.status === 'completed' && untranslated === 0) return false;
-          return Boolean(p.isPriority) || p.status === 'has_incomplete' || p.status === 'error' || p.status === 'waiting_for_keys' || Boolean(p.hasDisruption) || Boolean(p.lastError) || (untranslated > 0 && p.translatedCues > 0);
-        });
-
-        const untranslatedPendingProjects = (allProjects || []).filter((p) => {
-          const isTranslating = p.status === 'translating' || workerStatus?.activeProjects?.some((ap) => ap.id === p.id);
-          if (isTranslating) return false;
-          if (p.status === 'completed') return false;
-          if (Boolean(p.isPriority)) return false;
-          if (p.status === 'has_incomplete' || p.status === 'error' || p.status === 'waiting_for_keys' || p.hasDisruption) return false;
-          const untranslated = p.totalCues > 0 ? (p.totalCues - p.translatedCues) : 0;
-          return p.translatedCues === 0 || (untranslated === p.totalCues) || p.status === 'queued' || p.status === 'idle';
-        });
-
-        const completedProjectsList = (allProjects || []).filter((p) => {
-          return p.status === 'completed' || (p.totalCues > 0 && p.translatedCues >= p.totalCues);
-        });
-
+        // Reserve keys count
         const reserveKeysCount = workerStatus?.reserveKeysCount !== undefined
           ? workerStatus.reserveKeysCount
           : Math.max(0, serverKeysCount - (workerStatus?.inFlightKeyThreads || 0));
 
+        // Sort folder projects for crisp display:
+        // 1. Translating now
+        // 2. Incomplete with progress / errors
+        // 3. Untranslated queued
+        // 4. Completed
+        const sortedDisplayProjects = [...currentFolderProjects].sort((a, b) => {
+          const isTranslatingA = a.status === 'translating' || workerStatus?.activeProjects?.some((ap) => ap.id === a.id);
+          const isTranslatingB = b.status === 'translating' || workerStatus?.activeProjects?.some((ap) => ap.id === b.id);
+          if (isTranslatingA && !isTranslatingB) return -1;
+          if (!isTranslatingA && isTranslatingB) return 1;
+
+          const isCompA = a.status === 'completed' || (a.totalCues > 0 && a.translatedCues >= a.totalCues);
+          const isCompB = b.status === 'completed' || (b.totalCues > 0 && b.translatedCues >= b.totalCues);
+          if (!isCompA && isCompB) return -1;
+          if (isCompA && !isCompB) return 1;
+
+          // Priority files first
+          if (Boolean(a.isPriority) !== Boolean(b.isPriority)) {
+            return a.isPriority ? -1 : 1;
+          }
+
+          // Incomplete files with fewer remaining cues first
+          const remA = a.totalCues > 0 ? a.totalCues - a.translatedCues : 0;
+          const remB = b.totalCues > 0 ? b.totalCues - b.translatedCues : 0;
+          return remA - remB;
+        });
+
         return (
           <div className="w-full bg-slate-900/95 border border-indigo-500/35 rounded-2xl p-4 sm:p-5 flex flex-col gap-4 shadow-2xl text-xs backdrop-blur-md">
-            {/* Row 1: Concurrency Controller, Presets, and Emergency CTA */}
-            <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-4 pb-4 border-b border-slate-800">
-              {/* Presets and Manual input */}
+            {/* Top Bar: Concurrency Config & Single Primary CTA */}
+            <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 pb-4 border-b border-slate-800">
+              
+              {/* Concurrency Selector with 6 files default */}
               <div className="flex flex-col sm:flex-row sm:items-center gap-3 flex-wrap">
                 <span className="font-bold text-white flex items-center gap-2 shrink-0 text-sm">
                   <Zap className="w-4 h-4 text-amber-400" />
                   <span>تعداد فایل‌های همزمان:</span>
                 </span>
 
-                {/* Quick Presets */}
                 <div className="flex items-center gap-1.5 flex-wrap">
                   {[1, 2, 4, 6, 8, 10, 12].map((num) => {
-                    const isSelected = (serverConfig.maxConcurrentProjects || 4) === num;
-                    const isUserFavorite = num === 6;
+                    const isSelected = filesConcurrency === num;
+                    const isDefault = num === 6;
                     return (
                       <button
                         key={num}
@@ -1656,470 +1678,227 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
                             ? 'bg-gradient-to-r from-indigo-600 to-violet-600 text-white shadow-lg shadow-indigo-600/40 border border-indigo-400 scale-105'
                             : 'bg-slate-800/90 text-slate-300 hover:text-white hover:bg-slate-700 border border-slate-700/70'
                         }`}
-                        title={`اجرای همزمان ${num} فایل زیرنویس با ${num} کلید اختصاصی`}
+                        title={`ترجمه همزمان ${num} فایل با ${num} کلید مجزا (بقیه در رزرو)`}
                       >
                         <span>{num} فایل</span>
-                        {isUserFavorite && !isSelected && (
-                          <span className="absolute -top-2 -right-1 text-[9px] font-sans px-1 py-0.2 bg-amber-500 text-slate-950 font-extrabold rounded-full">
-                            ۶ کلید
+                        {isDefault && (
+                          <span className={`absolute -top-2 -right-1 text-[9px] font-sans px-1 py-0.2 rounded-full font-extrabold ${
+                            isSelected ? 'bg-amber-400 text-slate-950' : 'bg-indigo-950 text-amber-300 border border-amber-500/50'
+                          }`}>
+                            پیش‌فرض
                           </span>
                         )}
                       </button>
                     );
                   })}
                 </div>
-
-                {/* Interactive Manual Numeric Input */}
-                <div className="flex items-center gap-1.5 bg-slate-950 px-2.5 py-1 rounded-xl border border-indigo-500/40 shrink-0">
-                  <span className="text-[11px] text-slate-400 font-semibold">دستی:</span>
-                  <input
-                    type="number"
-                    min={1}
-                    max={50}
-                    value={customConcurrentInput}
-                    onChange={(e) => setCustomConcurrentInput(e.target.value)}
-                    onKeyDown={(e) => {
-                      if (e.key === 'Enter') {
-                        const n = parseInt(customConcurrentInput, 10);
-                        if (!isNaN(n) && n > 0) handleSetDualConcurrency(n, 1);
-                      }
-                    }}
-                    className="w-12 bg-slate-900 border border-slate-700 text-center text-amber-300 font-mono font-bold text-xs rounded-lg py-1 focus:outline-none focus:border-indigo-400"
-                    placeholder="۶"
-                    title="تعداد فایل‌های همزمان را دستی وارد کنید (مثلاً ۶) و دکمه ثبت را بزنید"
-                  />
-                  <span className="text-[11px] text-slate-400">فایل</span>
-                  <button
-                    type="button"
-                    onClick={() => {
-                      const n = parseInt(customConcurrentInput, 10);
-                      if (!isNaN(n) && n > 0) handleSetDualConcurrency(n, 1);
-                    }}
-                    className="px-2.5 py-1 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-xs font-bold transition-colors shadow-xs cursor-pointer"
-                    title="ثبت و اعمال فوری تعداد فایل‌های همزمان"
-                  >
-                    ثبت
-                  </button>
-                </div>
               </div>
 
-              {/* Big Emergency CTA Button: Translate Incomplete Files */}
-              <div className="flex items-center gap-2 self-start xl:self-center shrink-0">
+              {/* The ONLY Primary Action Button: "ترجمه فایل‌های ناقص یا ترجمه‌نشده" */}
+              <div className="flex items-center gap-2 shrink-0 self-start lg:self-center">
                 <button
                   type="button"
-                  onClick={() => handleRetryIncomplete(activeView === 'inside_folder' ? selectedFolderId : undefined)}
+                  onClick={() => handleRetryIncomplete(currentFolder?.id)}
                   disabled={isRetryingIncomplete}
-                  className={`flex items-center gap-2 px-4 py-2.5 rounded-xl font-bold text-xs transition-all cursor-pointer shadow-lg ${
-                    emergencyIncompleteProjects.length > 0
-                      ? 'bg-gradient-to-r from-amber-500 via-rose-500 to-amber-500 text-slate-950 font-black hover:brightness-110 shadow-amber-500/30 ring-2 ring-amber-400/50 animate-pulse'
-                      : 'bg-amber-500/20 text-amber-300 hover:bg-amber-500/30 border border-amber-500/40'
+                  className={`flex items-center gap-2 px-5 py-2.5 rounded-xl font-black text-xs transition-all cursor-pointer shadow-xl ${
+                    folderIncompleteOrUntranslated.length > 0
+                      ? 'bg-gradient-to-r from-amber-500 via-rose-500 to-amber-500 text-slate-950 hover:brightness-110 shadow-amber-500/30 ring-2 ring-amber-400/50 scale-[1.02]'
+                      : 'bg-indigo-600/30 text-indigo-300 hover:bg-indigo-600/50 border border-indigo-500/40'
                   }`}
-                  title="انتقال فوری فایل‌های ناقص به لیست اضطراری (اولویت ۱) و آغاز بدون معطلی ترجمه آن‌ها با کلیدهای تعیین‌شده"
+                  title="شروع ترجمه فایل‌های ناقص یا ترجمه‌نشده این پوشه با اولویت اضطراری (اولویت ۱) و اختصاص ۶ کلید همزمان"
                 >
                   {isRetryingIncomplete ? (
                     <Loader2 className="w-4 h-4 animate-spin text-current" />
                   ) : (
-                    <RotateCcw className="w-4 h-4 text-current" />
+                    <Zap className="w-4 h-4 fill-current text-current" />
                   )}
-                  <span>⚡ ترجمه فایل‌های ناقص (انتقال به لیست اضطراری)</span>
-                  {emergencyIncompleteProjects.length > 0 && (
-                    <span className="px-2 py-0.5 rounded-full text-[10px] font-mono bg-slate-950 text-amber-300 border border-amber-400/60">
-                      {emergencyIncompleteProjects.length} فایل
+                  <span>⚡ ترجمه فایل‌های ناقص یا ترجمه‌نشده</span>
+                  {folderIncompleteOrUntranslated.length > 0 && (
+                    <span className="px-2 py-0.5 rounded-full text-[10px] font-mono bg-slate-950 text-amber-300 border border-amber-400/60 font-bold">
+                      {folderIncompleteOrUntranslated.length} فایل
                     </span>
                   )}
                 </button>
               </div>
             </div>
 
-            {/* Row 2: Live Status Formula & Allocation Badges */}
-            <div className="flex flex-wrap items-center justify-between gap-2.5 text-xs">
-              <div className="flex items-center gap-2 flex-wrap text-slate-300">
-                <span className="text-amber-400 font-bold flex items-center gap-1.5">
-                  <Sparkles className="w-4 h-4 text-amber-400" />
-                  <span>توزیع کلیدهای سرور:</span>
+            {/* Folder Isolation Banner & Key Pool Status */}
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-slate-950/80 border border-slate-800 rounded-xl p-3 text-xs">
+              <div className="flex items-center gap-2.5 flex-wrap">
+                <div className="flex items-center gap-1.5 font-bold text-amber-300">
+                  <FolderOpen className="w-4 h-4 text-amber-400" />
+                  <span>پوشه فعال:</span>
+                  <span className="text-white bg-slate-800 px-2.5 py-0.5 rounded-lg border border-slate-700">
+                    {currentFolder?.name || 'انتخاب‌نشده'}
+                  </span>
+                </div>
+
+                <span className="text-slate-600">|</span>
+
+                <div className="flex items-center gap-1.5 text-slate-300 text-[11px]">
+                  <ShieldCheck className="w-4 h-4 text-emerald-400 shrink-0" />
+                  <span className="text-emerald-300 font-semibold">قانون جداسازی پوشه‌ای:</span>
+                  <span className="text-slate-400">
+                    تا پایان کامل فایل‌های این پوشه، سرور خودکار وارد پوشه بعدی نخواهد شد.
+                  </span>
+                </div>
+              </div>
+
+              <div className="flex items-center gap-2 font-mono text-[11px] shrink-0">
+                <span className="bg-indigo-950/70 border border-indigo-500/40 text-indigo-300 px-2.5 py-1 rounded-lg">
+                  🔥 {filesConcurrency} فایل همزمان ({filesConcurrency} کلید فعال)
                 </span>
-
-                <span className="bg-slate-950 px-3 py-1 rounded-xl border border-indigo-500/30 text-white font-mono font-bold flex items-center gap-1.5">
-                  <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-                  <span>{files} فایل همزمان ({files} کلید فعال)</span>
+                <span className="bg-amber-950/60 border border-amber-500/40 text-amber-300 px-2.5 py-1 rounded-lg" title="به محض اتمام هر فایل یا بروز محدودیت نرخ، کلید بعدی از رزرو جایگزین می‌شود">
+                  🛡️ {reserveKeysCount} کلید رزرو
                 </span>
+              </div>
+            </div>
 
-                <span className="text-slate-500">|</span>
-
-                <span className="bg-amber-950/70 text-amber-300 border border-amber-500/30 px-3 py-1 rounded-xl font-bold flex items-center gap-1.5">
-                  <span>🛡️ {reserveKeysCount} کلید در رزرو</span>
-                  <span className="text-[11px] text-amber-200/80 font-normal">(تعویض آنی کلید به محض اتمام هر فایل)</span>
-                </span>
-
-                <span className="text-slate-500">|</span>
-
-                <span className="bg-slate-950 px-2.5 py-1 rounded-xl border border-slate-800 text-slate-300 font-mono">
-                  🔑 مجموع استخر: {serverKeysCount} کلید
+            {/* Clean File List of this Folder */}
+            <div className="flex flex-col gap-2">
+              <div className="flex items-center justify-between text-xs text-slate-400 px-1 font-semibold">
+                <span>لیست فایل‌های پوشه ({sortedDisplayProjects.length} فایل):</span>
+                <span>
+                  {folderIncompleteOrUntranslated.length > 0 ? (
+                    <span className="text-amber-400 font-bold">{folderIncompleteOrUntranslated.length} فایل نیازمند ترجمه</span>
+                  ) : (
+                    <span className="text-emerald-400 font-bold">تمام فایل‌های این پوشه ترجمه شده‌اند ✓</span>
+                  )}
                 </span>
               </div>
 
-              {workerStatus?.lastMessage && (
-                <div className="text-[11px] font-mono text-cyan-300 bg-slate-950 px-3 py-1 rounded-xl border border-cyan-500/30 truncate max-w-full lg:max-w-md">
-                  {workerStatus.lastMessage}
+              {sortedDisplayProjects.length === 0 ? (
+                <div className="text-center py-8 text-slate-500 bg-slate-950/40 border border-slate-800/80 rounded-xl flex flex-col items-center gap-2">
+                  <Folder className="w-8 h-8 text-slate-600" />
+                  <p>هیچ فایلی در این پوشه ثبت نشده است.</p>
                 </div>
-              )}
-            </div>
+              ) : (
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5 max-h-[360px] overflow-y-auto pr-1">
+                  {sortedDisplayProjects.map((p) => {
+                    const activeItem = workerStatus?.activeProjects?.find((ap) => ap.id === p.id);
+                    const isTranslating = p.status === 'translating' || Boolean(activeItem);
+                    const isCompleted = p.status === 'completed' || (p.totalCues > 0 && p.translatedCues >= p.totalCues);
+                    const pct = activeItem
+                      ? activeItem.progressPercent
+                      : (p.totalCues > 0 ? Math.floor((p.translatedCues / p.totalCues) * 100) : 0);
+                    const transCues = activeItem ? activeItem.translatedCues : p.translatedCues;
+                    const totCues = activeItem ? activeItem.totalCues : p.totalCues;
+                    const remaining = Math.max(0, totCues - transCues);
+                    const keyMask = activeItem?.keyMasked || (p.workerKeyUsed ? p.workerKeyUsed.slice(0, 4) + '...' + p.workerKeyUsed.slice(-4) : null);
 
-            {/* Row 3: Live Interactive Queue Tabs */}
-            <div className="flex items-center gap-2 pt-2 border-t border-slate-800/80 flex-wrap">
-              <button
-                type="button"
-                onClick={() => setActiveQueueSubTab('translating')}
-                className={`flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs font-bold transition-all cursor-pointer ${
-                  activeQueueSubTab === 'translating'
-                    ? 'bg-amber-500/20 text-amber-300 border border-amber-500/50 shadow-md shadow-amber-500/10'
-                    : 'bg-slate-950 text-slate-400 hover:text-white border border-slate-800'
-                }`}
-              >
-                <Loader2 className={`w-3.5 h-3.5 ${liveTranslatingProjects.length > 0 ? 'animate-spin text-amber-400' : 'text-slate-400'}`} />
-                <span>فایل‌های در حال ترجمه</span>
-                <span className={`px-2 py-0.2 rounded-full text-[10px] font-mono font-bold ${
-                  liveTranslatingProjects.length > 0 ? 'bg-amber-500 text-slate-950' : 'bg-slate-800 text-slate-400'
-                }`}>
-                  {liveTranslatingProjects.length}
-                </span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => setActiveQueueSubTab('emergency')}
-                className={`flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs font-bold transition-all cursor-pointer ${
-                  activeQueueSubTab === 'emergency'
-                    ? 'bg-rose-500/25 text-rose-300 border border-rose-500/60 shadow-md shadow-rose-500/20 ring-1 ring-rose-500/40'
-                    : 'bg-slate-950 text-slate-400 hover:text-rose-300 border border-slate-800'
-                }`}
-              >
-                <AlertCircle className="w-3.5 h-3.5 text-rose-400" />
-                <span>لیست اضطراری و فایل‌های ناقص</span>
-                <span className={`px-2 py-0.2 rounded-full text-[10px] font-mono font-bold ${
-                  emergencyIncompleteProjects.length > 0 ? 'bg-rose-500 text-white animate-pulse' : 'bg-slate-800 text-slate-400'
-                }`}>
-                  {emergencyIncompleteProjects.length}
-                </span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => setActiveQueueSubTab('untranslated')}
-                className={`flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs font-bold transition-all cursor-pointer ${
-                  activeQueueSubTab === 'untranslated'
-                    ? 'bg-indigo-500/20 text-indigo-300 border border-indigo-500/50 shadow-md shadow-indigo-500/10'
-                    : 'bg-slate-950 text-slate-400 hover:text-white border border-slate-800'
-                }`}
-              >
-                <Clock className="w-3.5 h-3.5 text-indigo-400" />
-                <span>فایل‌های ترجمه نشده در صف</span>
-                <span className="px-2 py-0.2 rounded-full text-[10px] font-mono font-bold bg-slate-800 text-slate-300">
-                  {untranslatedPendingProjects.length}
-                </span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => setActiveQueueSubTab('completed')}
-                className={`flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs font-bold transition-all cursor-pointer ${
-                  activeQueueSubTab === 'completed'
-                    ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/50 shadow-md shadow-emerald-500/10'
-                    : 'bg-slate-950 text-slate-400 hover:text-white border border-slate-800'
-                }`}
-              >
-                <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
-                <span>تکمیل شده‌ها</span>
-                <span className="px-2 py-0.2 rounded-full text-[10px] font-mono font-bold bg-slate-800 text-emerald-400">
-                  {completedProjectsList.length}
-                </span>
-              </button>
-            </div>
-
-            {/* Row 4: Tab Content Panels */}
-            <div className="w-full bg-slate-950/70 border border-slate-800 rounded-xl p-3 sm:p-4 min-h-[140px] flex flex-col justify-center">
-              {/* TAB 1: TRANSLATING NOW */}
-              {activeQueueSubTab === 'translating' && (
-                <div className="flex flex-col gap-3">
-                  {liveTranslatingProjects.length === 0 ? (
-                    <div className="flex flex-col items-center justify-center py-6 text-center text-slate-400 gap-2">
-                      <Clock className="w-8 h-8 text-slate-600 mb-1" />
-                      <p className="font-semibold text-slate-300">در حال حاضر هیچ فایلی در حال ترجمه موازی نیست.</p>
-                      <p className="text-[11px] text-slate-500 max-w-md">
-                        برای شروع، دکمه «⚡ ترجمه فایل‌های ناقص» بالا را بزنید یا از زبانه «لیست اضطراری» روی شروع کلیک کنید.
-                      </p>
-                      {emergencyIncompleteProjects.length > 0 && (
-                        <button
-                          type="button"
-                          onClick={() => handleRetryIncomplete()}
-                          className="mt-2 flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold bg-amber-500 text-slate-950 hover:bg-amber-400 transition-colors cursor-pointer shadow-xs"
-                        >
-                          <Play className="w-3.5 h-3.5 fill-current" />
-                          <span>شروع فوری ترجمه {emergencyIncompleteProjects.length} فایل ناقص</span>
-                        </button>
-                      )}
-                    </div>
-                  ) : (
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                      {liveTranslatingProjects.map((p) => {
-                        const activeItem = workerStatus?.activeProjects?.find((ap) => ap.id === p.id);
-                        const pct = activeItem ? activeItem.progressPercent : (p.totalCues > 0 ? Math.floor((p.translatedCues / p.totalCues) * 100) : 0);
-                        const transCues = activeItem ? activeItem.translatedCues : p.translatedCues;
-                        const totCues = activeItem ? activeItem.totalCues : p.totalCues;
-                        const keyMask = activeItem?.keyMasked || (p.workerKeyUsed ? p.workerKeyUsed.slice(0, 4) + '...' + p.workerKeyUsed.slice(-4) : 'کلید اختصاصی');
-
-                        return (
-                          <div
-                            key={p.id}
-                            className="bg-slate-900/90 border border-amber-500/40 rounded-xl p-3 flex flex-col gap-2.5 shadow-md relative overflow-hidden"
-                          >
-                            <div className="flex items-center justify-between gap-2">
-                              <div className="flex items-center gap-2 min-w-0">
-                                <div className="w-7 h-7 rounded-lg bg-amber-500/20 text-amber-400 flex items-center justify-center shrink-0">
-                                  <Loader2 className="w-4 h-4 animate-spin" />
-                                </div>
-                                <div className="flex flex-col min-w-0">
-                                  <span className="font-bold text-white text-xs truncate max-w-[220px] sm:max-w-[260px]">{p.name}</span>
-                                  <div className="flex items-center gap-1.5 text-[10px] text-slate-400 font-mono">
-                                    <span className="text-amber-300 font-bold">{p.folderName || 'پوشه'}</span>
-                                    <span>•</span>
-                                    <span>{transCues} از {totCues} سطر ({pct}%)</span>
-                                  </div>
-                                </div>
-                              </div>
-
-                              <div className="flex items-center gap-1.5 shrink-0">
-                                <span className="text-[10px] font-mono px-2 py-0.5 rounded-md bg-indigo-950 text-indigo-300 border border-indigo-800">
-                                  {keyMask}
-                                </span>
-                                <button
-                                  type="button"
-                                  onClick={() => handlePauseProject(p.id, p.name)}
-                                  className="p-1 rounded-md bg-amber-500/10 text-amber-300 hover:bg-amber-500/20 border border-amber-500/30 cursor-pointer"
-                                  title="توقف موقت"
-                                >
-                                  <Pause className="w-3.5 h-3.5" />
-                                </button>
-                              </div>
-                            </div>
-
-                            {/* Progress bar */}
-                            <div className="w-full bg-slate-950 rounded-full h-2 overflow-hidden border border-slate-800">
-                              <div
-                                className="bg-gradient-to-r from-amber-500 via-indigo-500 to-amber-400 h-full rounded-full transition-all duration-300 relative"
-                                style={{ width: `${Math.max(5, pct)}%` }}
-                              />
-                            </div>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {/* TAB 2: EMERGENCY PRIORITY & INCOMPLETE QUEUE */}
-              {activeQueueSubTab === 'emergency' && (
-                <div className="flex flex-col gap-3">
-                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-rose-950/30 border border-rose-500/40 rounded-xl p-3 text-xs">
-                    <div className="flex items-center gap-2">
-                      <AlertCircle className="w-4 h-4 text-rose-400 shrink-0" />
-                      <span className="text-rose-200">
-                        {emergencyIncompleteProjects.length > 0
-                          ? `تعداد ${emergencyIncompleteProjects.length} فایل در لیست اضطراری (اولویت اول ترجمه) قرار دارند.`
-                          : 'هیچ فایل ناقص یا دارای خطایی یافت نشد. همه فایل‌ها تکمیل شده یا در حال ترجمه هستند.'}
-                      </span>
-                    </div>
-
-                    {emergencyIncompleteProjects.length > 0 && (
-                      <button
-                        type="button"
-                        onClick={() => handleRetryIncomplete()}
-                        disabled={isRetryingIncomplete}
-                        className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-bold bg-rose-600 hover:bg-rose-500 text-white transition-colors cursor-pointer shadow-xs shrink-0"
+                    return (
+                      <div
+                        key={p.id}
+                        className={`rounded-xl p-3 flex flex-col gap-2 border transition-all ${
+                          isTranslating
+                            ? 'bg-slate-900 border-amber-500/50 shadow-md shadow-amber-500/10'
+                            : isCompleted
+                            ? 'bg-slate-950/80 border-emerald-500/25 hover:border-emerald-500/40'
+                            : Boolean(p.isPriority)
+                            ? 'bg-slate-900 border-rose-500/40 shadow-xs'
+                            : 'bg-slate-900/80 border-slate-800 hover:border-slate-700'
+                        }`}
                       >
-                        {isRetryingIncomplete ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Play className="w-3.5 h-3.5 fill-current" />}
-                        <span>⚡ اجرای فوری کل لیست اضطراری ({files} فایل همزمان)</span>
-                      </button>
-                    )}
-                  </div>
-
-                  {emergencyIncompleteProjects.length > 0 && (
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5 max-h-[360px] overflow-y-auto pr-1">
-                      {emergencyIncompleteProjects.map((p) => {
-                        const remaining = Math.max(0, p.totalCues - p.translatedCues);
-                        const pct = p.totalCues > 0 ? Math.floor((p.translatedCues / p.totalCues) * 100) : 0;
-                        return (
-                          <div
-                            key={p.id}
-                            className="bg-slate-900/90 border border-rose-500/35 hover:border-rose-400/60 rounded-xl p-3 flex flex-col gap-2 transition-all shadow-xs"
-                          >
-                            <div className="flex items-center justify-between gap-2">
-                              <div className="flex items-center gap-2 min-w-0">
-                                <span className="px-2 py-0.5 rounded-md text-[10px] font-bold bg-rose-500/20 text-rose-300 border border-rose-500/40 shrink-0 flex items-center gap-1">
-                                  <AlertCircle className="w-3 h-3 text-rose-400" />
-                                  <span>اولویت ۱</span>
-                                </span>
-                                <span className="font-bold text-white text-xs truncate max-w-[180px] sm:max-w-[240px]" title={p.name}>
-                                  {p.name}
-                                </span>
-                              </div>
-
-                              <span className="text-[10px] text-amber-300 font-mono bg-amber-950/60 px-2 py-0.5 rounded-md border border-amber-500/30 shrink-0">
-                                {remaining} سطر باقی‌مانده ({pct}%)
-                              </span>
-                            </div>
-
-                            <div className="flex items-center justify-between gap-2 pt-1 border-t border-slate-800 text-[11px]">
-                              <span className="text-slate-400 font-mono text-[10px]">{p.folderName || 'پوشه'}</span>
-
-                              <div className="flex items-center gap-1.5">
-                                <button
-                                  type="button"
-                                  onClick={() => handleStartProject(p.id, p.name)}
-                                  className="flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-bold bg-indigo-600 hover:bg-indigo-500 text-white cursor-pointer transition-colors"
-                                  title="شروع فوری ترجمه این فایل"
-                                >
-                                  <Play className="w-3 h-3 fill-current" />
-                                  <span>شروع فوری</span>
-                                </button>
-
-                                <button
-                                  type="button"
-                                  onClick={() => handleDeprioritizeProject(p.id, p.name)}
-                                  disabled={prioritizingProjectId === p.id}
-                                  className="px-2 py-1 rounded-lg text-[10px] font-semibold bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 cursor-pointer"
-                                  title="خروج از اولویت اضطراری و بازگشت به صف عادی"
-                                >
-                                  خروج از اولویت
-                                </button>
-                              </div>
-                            </div>
-                          </div>
-                        );
-                      })}
-                    </div>
-                  )}
-                </div>
-              )}
-
-              {/* TAB 3: UNTRANSLATED & QUEUED */}
-              {activeQueueSubTab === 'untranslated' && (
-                <div className="flex flex-col gap-3">
-                  <div className="flex items-center justify-between gap-2 text-xs text-slate-400 pb-1">
-                    <span>تعداد {untranslatedPendingProjects.length} فایل زیرنویس در صف انتظار ترجمه قرار دارند:</span>
-                    <span className="text-[11px] text-indigo-400 font-semibold">
-                      با زدن «ارتقا به اضطراری»، فایل فوراً به ابتدای صف منتقل می‌شود.
-                    </span>
-                  </div>
-
-                  {untranslatedPendingProjects.length === 0 ? (
-                    <div className="text-center py-6 text-slate-400 text-xs">
-                      هیچ فایل ترجمه نشده‌ای در صف نیست.
-                    </div>
-                  ) : (
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5 max-h-[360px] overflow-y-auto pr-1">
-                      {untranslatedPendingProjects.map((p, idx) => (
-                        <div
-                          key={p.id}
-                          className="bg-slate-900/80 border border-slate-800 hover:border-slate-700 rounded-xl p-3 flex items-center justify-between gap-3"
-                        >
+                        <div className="flex items-center justify-between gap-2">
                           <div className="flex items-center gap-2 min-w-0">
-                            <span className="font-mono text-[10px] font-bold px-1.5 py-0.5 rounded bg-slate-800 text-slate-400 shrink-0">
-                              #{idx + 1}
+                            {isTranslating ? (
+                              <Loader2 className="w-4 h-4 animate-spin text-amber-400 shrink-0" />
+                            ) : isCompleted ? (
+                              <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+                            ) : Boolean(p.isPriority) ? (
+                              <Zap className="w-4 h-4 text-rose-400 shrink-0" />
+                            ) : (
+                              <Clock className="w-4 h-4 text-slate-500 shrink-0" />
+                            )}
+                            <span className="font-bold text-white text-xs truncate max-w-[200px] sm:max-w-[260px]" title={p.name}>
+                              {p.name}
                             </span>
-                            <div className="flex flex-col min-w-0">
-                              <span className="font-bold text-white text-xs truncate max-w-[180px] sm:max-w-[240px]" title={p.name}>
-                                {p.name}
-                              </span>
-                              <span className="text-[10px] text-slate-400 font-mono">
-                                {p.folderName || 'پوشه'} • {p.totalCues} سطر
-                              </span>
-                            </div>
                           </div>
 
                           <div className="flex items-center gap-1.5 shrink-0">
-                            <button
-                              type="button"
-                              onClick={() => handlePrioritizeProject(p.id, p.name)}
-                              disabled={prioritizingProjectId === p.id}
-                              className="flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-bold bg-amber-500/15 text-amber-300 hover:bg-amber-500/25 border border-amber-500/30 cursor-pointer transition-colors"
-                              title="ارتقا به لیست اضطراری (اولویت ۱) برای شروع قبل از سایر فایل‌ها"
-                            >
-                              <Zap className="w-3 h-3 text-amber-400" />
-                              <span>ارتقا به اضطراری</span>
-                            </button>
-
-                            <button
-                              type="button"
-                              onClick={() => handleStartProject(p.id, p.name)}
-                              className="p-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white cursor-pointer"
-                              title="شروع ترجمه"
-                            >
-                              <Play className="w-3 h-3 fill-current" />
-                            </button>
+                            {keyMask && isTranslating && (
+                              <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-indigo-950 text-indigo-300 border border-indigo-800">
+                                {keyMask}
+                              </span>
+                            )}
+                            <span className={`text-[10px] font-mono px-2 py-0.5 rounded-md font-bold ${
+                              isTranslating
+                                ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40'
+                                : isCompleted
+                                ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
+                                : remaining > 0 && transCues > 0
+                                ? 'bg-rose-500/20 text-rose-300 border border-rose-500/40'
+                                : 'bg-slate-800 text-slate-400'
+                            }`}>
+                              {isTranslating
+                                ? `در حال ترجمه (${pct}%)`
+                                : isCompleted
+                                ? 'تکمیل شده (۱۰۰٪)'
+                                : remaining > 0 && transCues > 0
+                                ? `ناقص (${remaining} سطر مانده)`
+                                : 'ترجمه‌نشده'}
+                            </span>
                           </div>
                         </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              )}
 
-              {/* TAB 4: COMPLETED */}
-              {activeQueueSubTab === 'completed' && (
-                <div className="flex flex-col gap-3">
-                  <div className="flex items-center justify-between gap-2 text-xs text-slate-400 pb-1">
-                    <span>تعداد {completedProjectsList.length} فایل زیرنویس با موفقیت ۱۰۰٪ ترجمه شده‌اند:</span>
-                  </div>
+                        {/* Progress Bar */}
+                        <div className="w-full bg-slate-950 rounded-full h-1.5 overflow-hidden border border-slate-800/80">
+                          <div
+                            className={`h-full rounded-full transition-all duration-300 ${
+                              isCompleted
+                                ? 'bg-emerald-500'
+                                : isTranslating
+                                ? 'bg-gradient-to-r from-amber-500 via-indigo-500 to-amber-400'
+                                : 'bg-indigo-600/70'
+                            }`}
+                            style={{ width: `${Math.max(isCompleted ? 100 : (transCues > 0 ? 5 : 0), pct)}%` }}
+                          />
+                        </div>
 
-                  {completedProjectsList.length === 0 ? (
-                    <div className="text-center py-6 text-slate-400 text-xs">
-                      هنوز فایلی ۱۰۰٪ تکمیل نشده است.
-                    </div>
-                  ) : (
-                    <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5 max-h-[360px] overflow-y-auto pr-1">
-                      {completedProjectsList.map((p) => (
-                        <div
-                          key={p.id}
-                          className="bg-slate-900/80 border border-emerald-500/30 rounded-xl p-3 flex items-center justify-between gap-3"
-                        >
-                          <div className="flex items-center gap-2 min-w-0">
-                            <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
-                            <div className="flex flex-col min-w-0">
-                              <span className="font-bold text-white text-xs truncate max-w-[180px] sm:max-w-[240px]" title={p.name}>
-                                {p.name}
-                              </span>
-                              <span className="text-[10px] text-slate-400 font-mono">
-                                {p.folderName || 'پوشه'} • {p.totalCues} سطر (۱۰۰٪)
-                              </span>
-                            </div>
-                          </div>
+                        {/* Stats & Direct Action Button */}
+                        <div className="flex items-center justify-between text-[11px] pt-1 border-t border-slate-800/60">
+                          <span className="text-slate-400 font-mono text-[10px]">
+                            {transCues} از {totCues} سطر
+                            {remaining > 0 && !isCompleted && ` (${remaining} سطر باقی‌مانده)`}
+                          </span>
 
-                          <div className="flex items-center gap-1.5 shrink-0">
-                            <a
-                              href={`/api/projects/${p.id}/export/srt`}
-                              download
-                              className="px-2 py-1 rounded-lg text-[10px] font-bold bg-amber-500/15 text-amber-300 hover:bg-amber-500/25 border border-amber-500/30 flex items-center gap-1"
-                              title="دانلود SRT"
-                            >
-                              <Download className="w-3 h-3" />
-                              <span>SRT</span>
-                            </a>
-                            <a
-                              href={`/api/projects/${p.id}/export/vtt`}
-                              download
-                              className="px-2 py-1 rounded-lg text-[10px] font-bold bg-emerald-500/15 text-emerald-300 hover:bg-emerald-500/25 border border-emerald-500/30 flex items-center gap-1"
-                              title="دانلود VTT"
-                            >
-                              <Download className="w-3 h-3" />
-                              <span>VTT</span>
-                            </a>
+                          <div className="flex items-center gap-1.5">
+                            {isTranslating ? (
+                              <button
+                                type="button"
+                                onClick={() => handlePauseProject(p.id, p.name)}
+                                className="flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-semibold bg-amber-500/15 text-amber-300 hover:bg-amber-500/25 border border-amber-500/30 cursor-pointer transition-colors"
+                                title="توقف موقت"
+                              >
+                                <Pause className="w-3 h-3" />
+                                <span>توقف</span>
+                              </button>
+                            ) : !isCompleted ? (
+                              <button
+                                type="button"
+                                onClick={() => handleStartProject(p.id, p.name)}
+                                className="flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-semibold bg-indigo-600 hover:bg-indigo-500 text-white cursor-pointer transition-colors shadow-xs"
+                                title="شروع ترجمه این فایل"
+                              >
+                                <Play className="w-3 h-3 fill-current" />
+                                <span>شروع</span>
+                              </button>
+                            ) : (
+                              <a
+                                href={`/api/projects/${p.id}/export/srt`}
+                                download
+                                className="flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-semibold bg-emerald-500/15 text-emerald-300 hover:bg-emerald-500/25 border border-emerald-500/30"
+                                title="دانلود زیرنویس SRT"
+                              >
+                                <Download className="w-3 h-3" />
+                                <span>SRT</span>
+                              </a>
+                            )}
                           </div>
                         </div>
-                      ))}
-                    </div>
-                  )}
+                      </div>
+                    );
+                  })}
                 </div>
               )}
             </div>
