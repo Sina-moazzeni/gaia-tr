@@ -647,9 +647,16 @@ export async function translateBatchWithDedicatedKey(
 
         if (isRateLimit || isAuthError) {
           markKeyAsExhausted(currentKey, isRateLimit ? 'اتمام توکن/سهمیه (429)' : 'کلید نامعتبر');
-          console.warn(`[BackgroundWorker] Key exhausted (${isRateLimit ? '429 RateLimit' : 'Auth'}). Switching to next available key...`);
+          console.warn(`[BackgroundWorker] Key ${currentKey.slice(0, 6)}... quota limit hit (429). Shifted to pool back. Substituting fresh key immediately...`);
           keyFailedWithRateOrAuth = true;
-          break; // Break model loop to move to next key in keysQueue
+          // Dynamically append any fresh keys that were pushed to the front of pool
+          const freshPoolKeys = getServerKeys().filter((k) => !isKeyExhausted(k));
+          for (const fk of freshPoolKeys) {
+            if (!keysQueue.includes(fk)) {
+              keysQueue.push(fk);
+            }
+          }
+          break; // Break model loop to move to next key in keysQueue immediately
         } else {
           console.warn(`[BackgroundWorker] Non-rate-limit error on model ${modelToUse}: ${msg.slice(0, 120)}`);
           await new Promise((r) => setTimeout(r, 1200));
@@ -908,33 +915,34 @@ async function processTick(): Promise<void> {
     return;
   }
 
-  const defaultKeysPerFile = config.maxKeysPerProject || 2;
-  const maxActiveFiles = Math.max(config.maxConcurrentProjects || 4, Math.ceil(allKeys.length / Math.max(1, defaultKeysPerFile)));
-  const maxTotalKeys = Math.max(1, Math.min(config.maxTotalParallelKeys || 8, 32));
-  const maxKeyThreads = Math.min(maxTotalKeys, Math.max(1, allKeys.length));
+  // Concurrency is determined directly by maxConcurrentProjects and maxKeysPerProject
+  const maxActiveFiles = Math.max(1, config.maxConcurrentProjects || 4);
+  const keysPerFile = Math.max(1, config.maxKeysPerProject || 2);
+  const totalMaxKeyThreads = Math.min(allKeys.length, maxActiveFiles * keysPerFile);
 
   // Check how many worker key slots are open
-  let availableKeySlots = maxKeyThreads - busyKeys.size;
+  let availableKeySlots = totalMaxKeyThreads - busyKeys.size;
   if (availableKeySlots <= 0) return;
 
   // 1. Auto-complete any project whose all cues have translations
   for (const p of db.projects) {
-    if (p.status !== 'completed' && p.totalCues > 0) {
+    if (p.totalCues > 0) {
       const untranslated = p.items.filter((i) => !i.translatedText || !i.translatedText.trim());
       if (untranslated.length === 0) {
         p.status = 'completed';
         p.completedAt = p.completedAt || new Date().toISOString();
         p.translatedCues = p.totalCues;
         p.failedCueIds = [];
+        p.hasDisruption = false;
         p.lastError = undefined;
         p.errorMessage = undefined;
       }
     }
   }
 
-  // 2. Candidate projects needing translation (excluding completed and paused)
+  // 2. Candidate projects needing translation (must have untranslated cues and not paused)
   const candidateProjects = db.projects.filter((p) => {
-    if (p.status === 'completed' || p.status === 'paused') return false;
+    if (p.status === 'paused') return false;
     const untranslated = p.items.filter((i) => !i.translatedText || !i.translatedText.trim());
     return untranslated.length > 0;
   });
@@ -955,11 +963,21 @@ async function processTick(): Promise<void> {
     return remA - remB;
   });
 
+  // Track distinct files currently translating in parallel
+  const runningProjectIds = new Set(
+    Array.from(inFlightCueKeys).map((k) => k.split('_')[0])
+  );
+
   // Multi-File Simultaneous Concurrent Loop:
-  // Iterate across all active candidate files so they all translate concurrently in parallel!
-  let activeFilesCount = 0;
+  // Iterate across candidate files up to maxActiveFiles so they all translate concurrently!
   for (const project of candidateProjects) {
-    if (availableKeySlots <= 0 || activeFilesCount >= maxActiveFiles) break;
+    if (availableKeySlots <= 0) break;
+
+    const isAlreadyRunning = runningProjectIds.has(project.id);
+    if (!isAlreadyRunning && runningProjectIds.size >= maxActiveFiles) {
+      // Already running maximum concurrent files, skip to let them finish
+      continue;
+    }
 
     const untranslatedCues = project.items.filter(
       (item) => !item.translatedText || !item.translatedText.trim()
@@ -976,15 +994,15 @@ async function processTick(): Promise<void> {
     // CRITICAL USER REQUIREMENT:
     // "بعضی از فایل ها به آخر که نزدیک میشن کلید های اضافهی دگه نیاز ندارند کلید رو بزار برای فایل بعدی چون مثلا 20 سطر مانده و نمیشه 2 تا کلید همزمان فعال باشند"
     // If <= 35 cues left (or <= 1 batch), strictly limit this file to 1 key!
-    // Any extra keys are left for the next files in the queue!
+    // The second key is immediately freed for other waiting files in the queue!
     const isNearEnd = untranslatedCues.length <= 35 || (project.totalCues > 0 && (project.translatedCues / project.totalCues) >= 0.95);
-    const configuredFileMax = project.maxKeys || defaultKeysPerFile;
+    const configuredFileMax = project.maxKeys || keysPerFile;
     const fileKeyLimit = isNearEnd ? 1 : Math.min(configuredFileMax, Math.ceil(availableCues.length / BATCH_SIZE));
 
     const keysToDispatch = Math.min(availableKeySlots, Math.max(0, fileKeyLimit - inFlightBatches));
     if (keysToDispatch <= 0) continue; // Skip to next file so other files get keys!
 
-    activeFilesCount++;
+    runningProjectIds.add(project.id);
 
     for (let d = 0; d < keysToDispatch && availableCues.length > 0 && availableKeySlots > 0; d++) {
       const keyInfo = leaseAvailableKey(Array.from(busyKeys));
@@ -1000,6 +1018,7 @@ async function processTick(): Promise<void> {
       chunkCues.forEach((c) => inFlightCueKeys.add(project.id + '_' + c.id));
 
       project.status = 'translating';
+      project.hasDisruption = false;
       project.workerKeyUsed = leasedKey;
       scheduleSaveDatabase();
 
@@ -1047,15 +1066,18 @@ export function stopBackgroundWorker(): void {
 export function queueFolderForTranslation(folderId: string): number {
   const db = getDatabase();
   const folderProjects = db.projects.filter(
-    (p) => p.folderId === folderId && p.status !== 'completed' && p.status !== 'translating'
+    (p) => p.folderId === folderId && p.items.some((i) => !i.translatedText || !i.translatedText.trim())
   );
 
   folderProjects.forEach((p) => {
     p.status = 'queued';
+    p.hasDisruption = false;
     p.lastError = undefined;
     p.errorMessage = undefined;
+    p.failedCueIds = [];
   });
 
+  resetWorkerExhaustionBackoff();
   saveDatabaseSync();
   return folderProjects.length;
 }

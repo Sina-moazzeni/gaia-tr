@@ -366,11 +366,10 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
     }
   };
 
-  const handleSetDualConcurrency = async (files?: number, keys?: number, keysPerProject?: number) => {
+  const handleSetDualConcurrency = async (files?: number, keysPerProject?: number) => {
     try {
       const payload: Record<string, any> = {};
       if (files !== undefined) payload.maxConcurrentProjects = files;
-      if (keys !== undefined) payload.maxTotalParallelKeys = keys;
       if (keysPerProject !== undefined) payload.maxKeysPerProject = keysPerProject;
 
       const res = await fetch('/api/server/config', {
@@ -382,16 +381,15 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
       if (data.success && data.config) {
         setServerConfig(data.config);
         const f = data.config.maxConcurrentProjects || 4;
-        const k = data.config.maxTotalParallelKeys || 8;
         const kpp = data.config.maxKeysPerProject || 2;
-        onShowToast(`سرعت سرور تنظیم شد: ${f} فایل همزمان با ${k} کلید موازی (${kpp} کلید برای هر فایل).`, 'success');
+        onShowToast(`تنظیمات سرعت اعمال شد: ${f} فایل همزمان با ${kpp} کلید برای هر فایل (${f * kpp} کلید همزمان از استخر).`, 'success');
       }
     } catch {
       onShowToast('خطا در به‌روزرسانی تنظیمات سرور', 'error');
     }
   };
 
-  const handleSetConcurrency = (val: number) => handleSetDualConcurrency(val, undefined, undefined);
+  const handleSetConcurrency = (val: number) => handleSetDualConcurrency(val, undefined);
 
   // Upload state
   const [isUploading, setIsUploading] = useState(false);
@@ -1540,13 +1538,13 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
 
       {/* Quick Concurrency Control Bar (مدیریت همزمان فایل‌ها و کلیدهای موازی) */}
       <div className="w-full bg-slate-900/80 border border-indigo-500/20 rounded-2xl p-3.5 flex flex-col gap-3 shadow-lg text-xs">
-        {/* Row 1: Files, Keys & Keys-per-file controls */}
-        <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-3">
+        {/* Row 1: Files & Keys-per-file controls (برداشتن کلیدهای فعال در چرخه و کنترل مستقیم با تعداد فایل و کلید هر فایل) */}
+        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
           {/* Files Selector */}
           <div className="flex items-center gap-2 flex-wrap">
             <span className="font-bold text-slate-200 flex items-center gap-1.5">
               <FileText className="w-3.5 h-3.5 text-indigo-400" />
-              <span>فایل‌های همزمان:</span>
+              <span>تعداد فایل‌های همزمان:</span>
             </span>
             <div className="flex items-center gap-1 flex-wrap">
               {[1, 2, 4, 6, 8].map((num) => {
@@ -1555,13 +1553,13 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
                   <button
                     key={num}
                     type="button"
-                    onClick={() => handleSetDualConcurrency(num, undefined, undefined)}
-                    className={`px-2.5 py-1 rounded-lg font-mono font-bold text-xs transition-all cursor-pointer ${
+                    onClick={() => handleSetDualConcurrency(num, undefined)}
+                    className={`px-3 py-1.5 rounded-lg font-mono font-bold text-xs transition-all cursor-pointer ${
                       isSelected
                         ? 'bg-indigo-600 text-white shadow-xs border border-indigo-400'
                         : 'bg-slate-800 text-slate-400 hover:text-white hover:bg-slate-700 border border-slate-700/60'
                     }`}
-                    title={`اجرای همزمان ${num} فایل`}
+                    title={`اجرای همزمان ${num} فایل زیرنویس`}
                   >
                     {num} فایل
                   </button>
@@ -1574,7 +1572,7 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
           <div className="flex items-center gap-2 flex-wrap">
             <span className="font-bold text-cyan-300 flex items-center gap-1.5">
               <Sparkles className="w-3.5 h-3.5 text-cyan-400" />
-              <span>کلید برای هر فایل:</span>
+              <span>تعداد کلید برای هر فایل:</span>
             </span>
             <div className="flex items-center gap-1 flex-wrap">
               {[1, 2, 3, 4].map((num) => {
@@ -1583,13 +1581,13 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
                   <button
                     key={num}
                     type="button"
-                    onClick={() => handleSetDualConcurrency(undefined, undefined, num)}
-                    className={`px-2.5 py-1 rounded-lg font-mono font-bold text-xs transition-all cursor-pointer ${
+                    onClick={() => handleSetDualConcurrency(undefined, num)}
+                    className={`px-3 py-1.5 rounded-lg font-mono font-bold text-xs transition-all cursor-pointer ${
                       isSelected
                         ? 'bg-cyan-600 text-white shadow-xs border border-cyan-400'
                         : 'bg-slate-800 text-slate-400 hover:text-cyan-200 hover:bg-slate-700 border border-slate-700/60'
                     }`}
-                    title={`تخصیص حداکثر ${num} کلید موازی برای هر فایل`}
+                    title={`تخصیص حداکثر ${num} کلید موازی از استخر برای هر فایل`}
                   >
                     {num} کلید {num === 2 ? '(پیش‌فرض)' : ''}
                   </button>
@@ -1597,66 +1595,38 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
               })}
             </div>
           </div>
-
-          {/* Total Parallel Keys Selector */}
-          <div className="flex items-center gap-2 flex-wrap">
-            <span className="font-bold text-amber-300 flex items-center gap-1.5">
-              <Key className="w-3.5 h-3.5 text-amber-400" />
-              <span>کلیدهای فعال در چرخه:</span>
-            </span>
-            <div className="flex items-center gap-1 flex-wrap">
-              {[4, 8, 12, 16, 19, 24].map((num) => {
-                const isSelected = (serverConfig.maxTotalParallelKeys || 8) === num;
-                return (
-                  <button
-                    key={num}
-                    type="button"
-                    onClick={() => handleSetDualConcurrency(undefined, num, undefined)}
-                    className={`px-2.5 py-1 rounded-lg font-mono font-bold text-xs transition-all cursor-pointer ${
-                      isSelected
-                        ? 'bg-amber-600 text-white shadow-xs border border-amber-400'
-                        : 'bg-slate-800 text-slate-400 hover:text-amber-200 hover:bg-slate-700 border border-slate-700/60'
-                    }`}
-                    title={`توزیع کار روی ${num} کلید فعال موازی`}
-                  >
-                    {num} کلید {num === 19 ? '⭐' : ''}
-                  </button>
-                );
-              })}
-            </div>
-          </div>
         </div>
 
-        {/* Row 2: Live Speed & Distribution Formula Badge */}
+        {/* Row 2: Live Speed & Pool Formula Badge */}
         {(() => {
           const files = serverConfig.maxConcurrentProjects || 4;
-          const totalKeys = serverConfig.maxTotalParallelKeys || 8;
           const keysPerFile = serverConfig.maxKeysPerProject || 2;
-          const cuesPerBatch = 50;
+          const totalKeySlots = files * keysPerFile;
 
           return (
             <div className="w-full pt-2.5 border-t border-slate-800/80 flex flex-wrap items-center justify-between gap-2 text-[11px]">
               <div className="flex items-center gap-2 flex-wrap text-slate-300">
                 <span className="text-amber-400 font-bold flex items-center gap-1">
                   <Zap className="w-3.5 h-3.5 text-amber-400" />
-                  <span>توزیع بهینه کلیدها:</span>
+                  <span>مدیریت استخر کلیدها:</span>
                 </span>
-                <span className="bg-slate-950 px-2 py-0.5 rounded-md border border-slate-800 text-white font-mono font-bold">
-                  {files} فایل همزمان با {totalKeys} کلید در چرخه
+                <span className="bg-slate-950 px-2.5 py-0.5 rounded-md border border-slate-800 text-white font-mono font-bold">
+                  {files} فایل همزمان × {keysPerFile} کلید = {totalKeySlots} پردازش موازی فعال از استخر ({serverKeysCount} کلید موجود)
                 </span>
                 <span>➔</span>
-                <span className="bg-indigo-950/70 text-indigo-300 border border-indigo-500/30 px-2 py-0.5 rounded-md font-bold">
-                  {keysPerFile} کلید برای هر فایل ({keysPerFile * cuesPerBatch} سطر در هر نوبت)
+                <span className="bg-amber-950/70 text-amber-300 border border-amber-500/30 px-2 py-0.5 rounded-md text-[11px]">
+                  🔄 چرخش خودکار FIFO: هر کلیدی اتمام سهمیه خورد فوراً به انتهای استخر منتقل و کلید آماده بعدی جایگزین می‌شود
                 </span>
                 <span>➔</span>
                 <span className="bg-emerald-950/70 text-emerald-300 border border-emerald-500/30 px-2 py-0.5 rounded-md text-[11px]">
-                  ✨ آزادسازی خودکار کلید در ۳۵ سطر پایانی: کلید مازاد فوراً به فایل‌های دیگر تحویل داده می‌شود
+                  ✨ در ۳۵ سطر پایانی: فایل فقط با ۱ کلید ادامه می‌یابد و کلید مازاد فوراً به فایل‌های دیگر تعلق می‌گیرد
                 </span>
               </div>
 
               {workerStatus?.inFlightKeyThreads !== undefined && workerStatus.inFlightKeyThreads > 0 && (
-                <span className="text-[10px] font-mono text-cyan-300 bg-cyan-950/60 px-2 py-0.5 rounded-md border border-cyan-500/30">
-                  {workerStatus.inFlightKeyThreads} کلید در حال ارسال درخواست
+                <span className="text-[10px] font-mono text-cyan-300 bg-cyan-950/60 px-2.5 py-0.5 rounded-md border border-cyan-500/30 flex items-center gap-1.5">
+                  <span className="w-1.5 h-1.5 rounded-full bg-cyan-400 animate-pulse" />
+                  <span>{workerStatus.inFlightKeyThreads} پردازش همزمان فعال روی کلیدها</span>
                 </span>
               )}
             </div>
@@ -3144,37 +3114,12 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
                 </div>
               </div>
 
-              {/* Concurrency: maxTotalParallelKeys (Active Key Threads) */}
-              <div>
-                <label className="text-xs text-slate-300 font-semibold flex items-center justify-between mb-1">
-                  <span className="flex items-center gap-1.5">
-                    <Key className="w-3.5 h-3.5 text-amber-400" />
-                    <span>تعداد کلیدهای فعال همزمان در استخر (Parallel Key Threads):</span>
-                  </span>
-                  <span className="text-xs font-mono font-bold text-amber-300 px-2.5 py-0.5 rounded bg-slate-950 border border-slate-800">
-                    {serverConfig.maxTotalParallelKeys || 8} کلید
-                  </span>
-                </label>
-                <div className="flex items-center gap-4">
-                  <input
-                    type="range"
-                    min={1}
-                    max={32}
-                    step={1}
-                    value={serverConfig.maxTotalParallelKeys || 8}
-                    onChange={(e) => setServerConfig({ ...serverConfig, maxTotalParallelKeys: Number(e.target.value) })}
-                    className="w-full accent-amber-500 h-2 bg-slate-800 rounded-lg cursor-pointer"
-                  />
-                  <span className="text-xs font-mono text-slate-300 shrink-0">۱ تا ۳۲ کلید</span>
-                </div>
-              </div>
-
               {/* Concurrency: maxKeysPerProject */}
               <div>
                 <label className="text-xs text-slate-300 font-semibold flex items-center justify-between mb-1">
                   <span className="flex items-center gap-1.5">
                     <Sparkles className="w-3.5 h-3.5 text-cyan-400" />
-                    <span>سقف کلید همزمان برای هر فایل (Max Keys Per File):</span>
+                    <span>تعداد کلید همزمان برای هر فایل (Keys Per File):</span>
                   </span>
                   <span className="text-xs font-mono font-bold text-cyan-300 px-2.5 py-0.5 rounded bg-slate-950 border border-slate-800">
                     {serverConfig.maxKeysPerProject || 2} کلید {serverConfig.maxKeysPerProject === 2 ? '(پیش‌فرض بهینه)' : ''}
@@ -3193,29 +3138,30 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
                   <span className="text-xs font-mono text-slate-300 shrink-0">۱ تا ۴ کلید</span>
                 </div>
                 <p className="text-[11px] text-slate-400 mt-1">
-                  هر فایل حداکثر از این تعداد کلید به صورت همزمان بهره می‌برد. به محض رسیدن به ۳۵ سطر پایانی فایل، کلید دوم/مازاد آزاد شده و فوراً در اختیار فایل بعدی قرار می‌گیرد.
+                  هر فایل همزمان از این تعداد کلید به صورت موازی استفاده می‌کند (مثلاً ۵۰ سطر با کلید اول و ۵۰ سطر با کلید دوم به صورت همزمان).
                 </p>
               </div>
 
               {/* Live Formula Preview Card */}
               {(() => {
                 const f = serverConfig.maxConcurrentProjects || 4;
-                const k = serverConfig.maxTotalParallelKeys || 8;
                 const perFile = serverConfig.maxKeysPerProject || 2;
+                const totalWorkingKeys = f * perFile;
                 const cuesPerCall = perFile * 50;
 
                 return (
-                  <div className="bg-gradient-to-r from-indigo-950/40 via-slate-950 to-amber-950/30 border border-indigo-500/30 rounded-xl p-3 text-xs flex flex-col gap-1.5">
+                  <div className="bg-gradient-to-r from-indigo-950/40 via-slate-950 to-amber-950/30 border border-indigo-500/30 rounded-xl p-3.5 text-xs flex flex-col gap-2">
                     <div className="flex items-center gap-2 font-bold text-amber-300">
                       <Zap className="w-3.5 h-3.5 text-amber-400" />
-                      <span>توزیع همزمان و آزادسازی هوشمند کلیدها:</span>
+                      <span>محاسبه توان پردازش استخر کلیدها:</span>
                     </div>
                     <p className="text-slate-300 text-[11px] leading-relaxed">
-                      با <span className="text-white font-bold">{f} فایل همزمان</span> و <span className="text-amber-300 font-bold">{k} کلید فعال</span>، هر فایل با <span className="text-emerald-300 font-bold font-mono">{perFile} کلید اختصاصی</span> ({cuesPerCall} سطر در هر درخواست) با سرعت بالا ترجمه می‌شود.
+                      با <span className="text-white font-bold">{f} فایل همزمان</span> و <span className="text-cyan-300 font-bold">{perFile} کلید برای هر فایل</span>، دقیقاً <span className="text-amber-300 font-bold font-mono">{totalWorkingKeys} کلید موازی</span> همزمان از استخر کلیدها ({serverKeysCount} کلید موجود) فعال خواهد بود و در هر چرخه {cuesPerCall} سطر ترجمه می‌شود.
                     </p>
-                    <p className="text-[10px] text-cyan-300/90 bg-cyan-950/40 p-2 rounded-lg border border-cyan-800/40">
-                      ⚡ الگوریتم آزادسازی خودکار: برای ۲۰ سطر پایانی یک فایل نیازی به درگیر نگه‌داشتن کلیدهای اضافی نیست؛ سیستم کلید مازاد را فوراً به فایل بعدی تخصیص داده و همه فایل‌ها به صورت موازی به پیش می‌روند.
-                    </p>
+                    <div className="text-[10px] text-emerald-300 bg-emerald-950/50 p-2 rounded-lg border border-emerald-800/40 flex flex-col gap-1">
+                      <span>🔄 چرخش هوشمند FIFO: کلیدی که سهمیه‌اش تمام شود فوراً به انتهای صف استخر رفته و کلید آزاد بعدی جایگزین آن می‌شود.</span>
+                      <span>✨ آزادسازی خودکار: در ۳۵ سطر پایانی هر فایل تنها ۱ کلید درگیر مانده و کلیدهای دیگر به فایل بعدی داده می‌شوند.</span>
+                    </div>
                   </div>
                 );
               })()}
