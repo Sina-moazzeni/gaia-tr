@@ -76,6 +76,8 @@ export interface ServerProjectItem {
   tone: string;
   customPrompt?: string;
   status: 'idle' | 'queued' | 'translating' | 'paused' | 'waiting_for_keys' | 'has_incomplete' | 'completed' | 'error';
+  hasDisruption?: boolean;
+  maxKeys?: number;
   totalCues: number;
   translatedCues: number;
   currentBatchIndex: number;
@@ -128,6 +130,7 @@ export interface ServerConfigData {
   geminiBaseUrl: string;
   maxConcurrentProjects: number;
   maxTotalParallelKeys?: number;
+  maxKeysPerProject?: number;
 }
 
 export interface KeyDetailItem {
@@ -223,6 +226,7 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
     geminiBaseUrl: 'https://generativelanguage.googleapis.com',
     maxConcurrentProjects: 4,
     maxTotalParallelKeys: 8,
+    maxKeysPerProject: 2,
   });
   const [isSavingConfig, setIsSavingConfig] = useState(false);
 
@@ -340,11 +344,34 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
     }
   };
 
-  const handleSetDualConcurrency = async (files?: number, keys?: number) => {
+  const [isRetryingIncomplete, setIsRetryingIncomplete] = useState(false);
+  const handleRetryIncomplete = async (folderId?: string) => {
+    setIsRetryingIncomplete(true);
+    try {
+      const url = folderId ? `/api/folders/${folderId}/retry-incomplete` : '/api/projects/retry-incomplete';
+      const res = await fetch(url, { method: 'POST' });
+      const data = await res.json();
+      if (data.success) {
+        onShowToast(data.message || 'فایل‌های ناقص و دارای اختلال برای ترجمه در صف قرار گرفتند.', data.retriedCount > 0 ? 'success' : 'info');
+        if (selectedFolderId) await fetchProjects(selectedFolderId);
+        await fetchFolders();
+        if (activeView === 'all_files') await fetchAllProjects();
+      } else {
+        onShowToast(data.error || 'خطا در رفع خطای فایل‌ها', 'error');
+      }
+    } catch {
+      onShowToast('خطا در برقراری ارتباط با سرور', 'error');
+    } finally {
+      setIsRetryingIncomplete(false);
+    }
+  };
+
+  const handleSetDualConcurrency = async (files?: number, keys?: number, keysPerProject?: number) => {
     try {
       const payload: Record<string, any> = {};
       if (files !== undefined) payload.maxConcurrentProjects = files;
       if (keys !== undefined) payload.maxTotalParallelKeys = keys;
+      if (keysPerProject !== undefined) payload.maxKeysPerProject = keysPerProject;
 
       const res = await fetch('/api/server/config', {
         method: 'POST',
@@ -356,15 +383,15 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
         setServerConfig(data.config);
         const f = data.config.maxConcurrentProjects || 4;
         const k = data.config.maxTotalParallelKeys || 8;
-        const perFile = Math.max(1, Math.floor(k / f));
-        onShowToast(`سرعت سرور تنظیم شد: ${f} فایل همزمان با ${k} کلید موازی (${perFile} کلید در هر فایل = ${perFile * 50} سطر در هر درخواست).`, 'success');
+        const kpp = data.config.maxKeysPerProject || 2;
+        onShowToast(`سرعت سرور تنظیم شد: ${f} فایل همزمان با ${k} کلید موازی (${kpp} کلید برای هر فایل).`, 'success');
       }
     } catch {
       onShowToast('خطا در به‌روزرسانی تنظیمات سرور', 'error');
     }
   };
 
-  const handleSetConcurrency = (val: number) => handleSetDualConcurrency(val, undefined);
+  const handleSetConcurrency = (val: number) => handleSetDualConcurrency(val, undefined, undefined);
 
   // Upload state
   const [isUploading, setIsUploading] = useState(false);
@@ -1418,15 +1445,26 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
 
           <button
             type="button"
+            onClick={() => handleRetryIncomplete(activeView === 'inside_folder' ? selectedFolderId : undefined)}
+            disabled={isRetryingIncomplete}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold bg-amber-500/25 text-amber-300 hover:bg-amber-500/35 border border-amber-500/40 shadow-xs transition-all cursor-pointer"
+            title="رفع خودکار اختلالات سهمیه، خطاها و ادامه ترجمه تمام فایل‌های ناقص"
+          >
+            {isRetryingIncomplete ? <Loader2 className="w-3.5 h-3.5 animate-spin text-amber-400" /> : <RotateCcw className="w-3.5 h-3.5 text-amber-400" />}
+            <span>🛠️ رفع خطای فایل‌های ناقص</span>
+          </button>
+
+          <button
+            type="button"
             onClick={handleTurboComplete}
             disabled={isTurboCompleting}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold bg-amber-500/25 text-amber-300 hover:bg-amber-500/35 border border-amber-500/40 shadow-xs transition-all cursor-pointer"
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold bg-indigo-500/25 text-indigo-300 hover:bg-indigo-500/35 border border-indigo-500/40 shadow-xs transition-all cursor-pointer"
             title="تکمیل فوری و اولویت‌دار فایل‌های ناقص (۹۸٪ به بالا) بدون معطلی و با رفع خودکار افکت‌های صوتی"
           >
             {isTurboCompleting ? (
-              <Loader2 className="w-3.5 h-3.5 animate-spin text-amber-400" />
+              <Loader2 className="w-3.5 h-3.5 animate-spin text-indigo-400" />
             ) : (
-              <Sparkles className="w-3.5 h-3.5 text-amber-400" />
+              <Sparkles className="w-3.5 h-3.5 text-indigo-400" />
             )}
             <span>⚡ تکمیل فوری سطرها (توربو)</span>
           </button>
@@ -1502,8 +1540,8 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
 
       {/* Quick Concurrency Control Bar (مدیریت همزمان فایل‌ها و کلیدهای موازی) */}
       <div className="w-full bg-slate-900/80 border border-indigo-500/20 rounded-2xl p-3.5 flex flex-col gap-3 shadow-lg text-xs">
-        {/* Row 1: Files & Keys dual controls */}
-        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3">
+        {/* Row 1: Files, Keys & Keys-per-file controls */}
+        <div className="flex flex-col xl:flex-row xl:items-center justify-between gap-3">
           {/* Files Selector */}
           <div className="flex items-center gap-2 flex-wrap">
             <span className="font-bold text-slate-200 flex items-center gap-1.5">
@@ -1517,7 +1555,7 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
                   <button
                     key={num}
                     type="button"
-                    onClick={() => handleSetDualConcurrency(num, undefined)}
+                    onClick={() => handleSetDualConcurrency(num, undefined, undefined)}
                     className={`px-2.5 py-1 rounded-lg font-mono font-bold text-xs transition-all cursor-pointer ${
                       isSelected
                         ? 'bg-indigo-600 text-white shadow-xs border border-indigo-400'
@@ -1532,20 +1570,48 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
             </div>
           </div>
 
-          {/* Keys Selector */}
+          {/* Keys per file Selector */}
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="font-bold text-cyan-300 flex items-center gap-1.5">
+              <Sparkles className="w-3.5 h-3.5 text-cyan-400" />
+              <span>کلید برای هر فایل:</span>
+            </span>
+            <div className="flex items-center gap-1 flex-wrap">
+              {[1, 2, 3, 4].map((num) => {
+                const isSelected = (serverConfig.maxKeysPerProject || 2) === num;
+                return (
+                  <button
+                    key={num}
+                    type="button"
+                    onClick={() => handleSetDualConcurrency(undefined, undefined, num)}
+                    className={`px-2.5 py-1 rounded-lg font-mono font-bold text-xs transition-all cursor-pointer ${
+                      isSelected
+                        ? 'bg-cyan-600 text-white shadow-xs border border-cyan-400'
+                        : 'bg-slate-800 text-slate-400 hover:text-cyan-200 hover:bg-slate-700 border border-slate-700/60'
+                    }`}
+                    title={`تخصیص حداکثر ${num} کلید موازی برای هر فایل`}
+                  >
+                    {num} کلید {num === 2 ? '(پیش‌فرض)' : ''}
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+
+          {/* Total Parallel Keys Selector */}
           <div className="flex items-center gap-2 flex-wrap">
             <span className="font-bold text-amber-300 flex items-center gap-1.5">
               <Key className="w-3.5 h-3.5 text-amber-400" />
               <span>کلیدهای فعال در چرخه:</span>
             </span>
             <div className="flex items-center gap-1 flex-wrap">
-              {[4, 8, 12, 16, 20, 24].map((num) => {
+              {[4, 8, 12, 16, 19, 24].map((num) => {
                 const isSelected = (serverConfig.maxTotalParallelKeys || 8) === num;
                 return (
                   <button
                     key={num}
                     type="button"
-                    onClick={() => handleSetDualConcurrency(undefined, num)}
+                    onClick={() => handleSetDualConcurrency(undefined, num, undefined)}
                     className={`px-2.5 py-1 rounded-lg font-mono font-bold text-xs transition-all cursor-pointer ${
                       isSelected
                         ? 'bg-amber-600 text-white shadow-xs border border-amber-400'
@@ -1553,7 +1619,7 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
                     }`}
                     title={`توزیع کار روی ${num} کلید فعال موازی`}
                   >
-                    {num} کلید
+                    {num} کلید {num === 19 ? '⭐' : ''}
                   </button>
                 );
               })}
@@ -1564,30 +1630,27 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
         {/* Row 2: Live Speed & Distribution Formula Badge */}
         {(() => {
           const files = serverConfig.maxConcurrentProjects || 4;
-          const keys = serverConfig.maxTotalParallelKeys || 8;
-          const keysPerFile = Math.max(1, Math.floor(keys / files));
-          const cuesPerCycle = keysPerFile * 50;
+          const totalKeys = serverConfig.maxTotalParallelKeys || 8;
+          const keysPerFile = serverConfig.maxKeysPerProject || 2;
+          const cuesPerBatch = 50;
 
           return (
             <div className="w-full pt-2.5 border-t border-slate-800/80 flex flex-wrap items-center justify-between gap-2 text-[11px]">
               <div className="flex items-center gap-2 flex-wrap text-slate-300">
                 <span className="text-amber-400 font-bold flex items-center gap-1">
                   <Zap className="w-3.5 h-3.5 text-amber-400" />
-                  <span>فرمول سرعت ترجمه:</span>
+                  <span>توزیع بهینه کلیدها:</span>
                 </span>
                 <span className="bg-slate-950 px-2 py-0.5 rounded-md border border-slate-800 text-white font-mono font-bold">
-                  {files} فایل با {keys} کلید
+                  {files} فایل همزمان با {totalKeys} کلید در چرخه
                 </span>
                 <span>➔</span>
                 <span className="bg-indigo-950/70 text-indigo-300 border border-indigo-500/30 px-2 py-0.5 rounded-md font-bold">
-                  {keysPerFile} کلید همزمان روی هر فایل
+                  {keysPerFile} کلید برای هر فایل ({keysPerFile * cuesPerBatch} سطر در هر نوبت)
                 </span>
                 <span>➔</span>
-                <span className="bg-emerald-950/70 text-emerald-300 border border-emerald-500/30 px-2 py-0.5 rounded-md font-bold font-mono">
-                  {cuesPerCycle} سطر در هر درخواست
-                </span>
-                <span className="text-slate-400 hidden sm:inline">
-                  (سطرها دقیقاً بر اساس شناسه زمانی در جای خود ثبت می‌شوند بدون هیچ تداخل یا شیفت زمانی)
+                <span className="bg-emerald-950/70 text-emerald-300 border border-emerald-500/30 px-2 py-0.5 rounded-md text-[11px]">
+                  ✨ آزادسازی خودکار کلید در ۳۵ سطر پایانی: کلید مازاد فوراً به فایل‌های دیگر تحویل داده می‌شود
                 </span>
               </div>
 
@@ -2188,17 +2251,24 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
                     const isTranslating = proj.status === 'translating';
                     const isQueued = proj.status === 'queued';
                     const isWaitingKeys = proj.status === 'waiting_for_keys';
-                    const isIncomplete = proj.status === 'has_incomplete';
+                    const isDisrupted = Boolean(proj.hasDisruption) || proj.status === 'error' || (Boolean(proj.lastError) && !isComplete);
+                    const isIncomplete = proj.status === 'has_incomplete' || (!isComplete && !isTranslating && !isQueued && !isWaitingKeys && proj.translatedCues > 0 && proj.translatedCues < proj.totalCues);
                     const pct = isComplete ? 100 : (proj.totalCues > 0 ? Math.min(99, Math.floor((proj.translatedCues / proj.totalCues) * 100)) : 0);
 
                     return (
                       <div
                         key={proj.id}
-                        className="bg-slate-900/80 rounded-2xl border border-slate-800/90 hover:border-slate-700 p-4 flex flex-col gap-3 transition-all shadow-xs"
+                        className={`rounded-2xl border p-4 flex flex-col gap-3 transition-all shadow-xs ${
+                          isDisrupted
+                            ? 'bg-rose-950/20 border-rose-500/40 hover:border-rose-400/60'
+                            : 'bg-slate-900/80 border-slate-800/90 hover:border-slate-700'
+                        }`}
                       >
                         <div className="flex items-center justify-between gap-3 flex-wrap">
                           <div className="flex items-center gap-3 overflow-hidden">
-                            <div className="w-9 h-9 rounded-xl bg-slate-800 flex items-center justify-center text-indigo-400 shrink-0">
+                            <div className={`w-9 h-9 rounded-xl flex items-center justify-center shrink-0 ${
+                              isDisrupted ? 'bg-rose-900/40 text-rose-400' : 'bg-slate-800 text-indigo-400'
+                            }`}>
                               <FileText className="w-4 h-4" />
                             </div>
 
@@ -2220,7 +2290,7 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
                                   {proj.format}
                                 </span>
                                 <span>•</span>
-                                <span className={isIncomplete ? 'text-amber-400 font-bold' : ''}>
+                                <span className={isDisrupted ? 'text-rose-400 font-bold' : isIncomplete ? 'text-amber-400 font-bold' : ''}>
                                   {proj.translatedCues} / {proj.totalCues} سطر
                                 </span>
                                 {proj.tokenUsage?.totalTokens > 0 && (
@@ -2246,15 +2316,20 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
                                 <Loader2 className="w-3 h-3 animate-spin text-amber-400" />
                                 <span>در حال ترجمه ({pct}%)</span>
                               </span>
-                            ) : isWaitingKeys ? (
-                              <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-purple-500/15 text-purple-300 border border-purple-500/30 flex items-center gap-1">
-                                <Clock className="w-3 h-3 text-purple-400" />
-                                <span>در انتظار کلید/سهمیه ({pct}%)</span>
+                            ) : isDisrupted ? (
+                              <span className="text-[10px] font-bold px-2.5 py-0.5 rounded-full bg-rose-500/20 text-rose-300 border border-rose-500/40 flex items-center gap-1">
+                                <AlertCircle className="w-3 h-3 text-rose-400" />
+                                <span>⚠️ دچار اختلال ({pct}%)</span>
                               </span>
                             ) : isIncomplete ? (
                               <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-amber-500/15 text-amber-300 border border-amber-500/30 flex items-center gap-1">
                                 <AlertCircle className="w-3 h-3 text-amber-400" />
                                 <span>ترجمه ناقص ({pct}%)</span>
+                              </span>
+                            ) : isWaitingKeys ? (
+                              <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-purple-500/15 text-purple-300 border border-purple-500/30 flex items-center gap-1">
+                                <Clock className="w-3 h-3 text-purple-400" />
+                                <span>در انتظار کلید/سهمیه ({pct}%)</span>
                               </span>
                             ) : isQueued ? (
                               <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-slate-800 text-slate-400 border border-slate-700 flex items-center gap-1">
@@ -2267,21 +2342,21 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
                               </span>
                             )}
 
-                            {/* Resume button if incomplete or paused */}
-                            {(isIncomplete || isWaitingKeys || proj.status === 'paused') && !isTranslating && (
+                            {/* Resume / Fix button if disrupted, incomplete, waiting, or paused */}
+                            {(isDisrupted || isIncomplete || isWaitingKeys || proj.status === 'paused') && !isTranslating && (
                               <button
                                 type="button"
                                 onClick={() => handleResumeProject(proj.id, proj.name)}
-                                className="flex items-center gap-1 px-2.5 py-1 text-[11px] font-bold text-emerald-300 bg-emerald-500/15 hover:bg-emerald-500/25 border border-emerald-500/30 rounded-lg transition-colors"
-                                title="ادامه ترجمه از سطر باقی‌مانده"
+                                className="flex items-center gap-1 px-2.5 py-1 text-[11px] font-bold text-amber-300 bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/30 rounded-lg transition-colors cursor-pointer"
+                                title="رفع خطا و ادامه خودکار ترجمه از آخرین سطر باقی‌مانده"
                               >
-                                <Play className="w-3 h-3 fill-current" />
-                                <span>ادامه ترجمه</span>
+                                <RotateCcw className="w-3 h-3 text-amber-400" />
+                                <span>رفع خطا و ادامه</span>
                               </button>
                             )}
 
                             {/* Start translation if idle */}
-                            {!isTranslating && !isIncomplete && !isWaitingKeys && (
+                            {!isTranslating && !isDisrupted && !isIncomplete && !isWaitingKeys && (
                               <button
                                 type="button"
                                 onClick={() => handleStartProject(proj.id, proj.name)}
@@ -2435,15 +2510,21 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
                   const isComplete = proj.status === 'completed' || (proj.totalCues > 0 && proj.translatedCues >= proj.totalCues);
                   const pct = isComplete ? 100 : (proj.totalCues > 0 ? Math.min(99, Math.floor((proj.translatedCues / proj.totalCues) * 100)) : 0);
                   const isTranslating = proj.status === 'translating';
+                  const isDisrupted = Boolean(proj.hasDisruption) || proj.status === 'error' || (Boolean(proj.lastError) && !isComplete);
+                  const isIncomplete = proj.status === 'has_incomplete' || (!isComplete && !isTranslating && proj.status !== 'queued' && proj.status !== 'waiting_for_keys' && proj.translatedCues > 0 && proj.translatedCues < proj.totalCues);
 
                   return (
                     <div
                       key={proj.id}
-                      className="bg-slate-900/80 rounded-2xl border border-slate-800/90 hover:border-slate-700 p-4 flex flex-col gap-2.5 transition-all shadow-xs"
+                      className={`rounded-2xl border p-4 flex flex-col gap-2.5 transition-all shadow-xs ${
+                        isDisrupted
+                          ? 'bg-rose-950/20 border-rose-500/40 hover:border-rose-400/60'
+                          : 'bg-slate-900/80 border-slate-800/90 hover:border-slate-700'
+                      }`}
                     >
                       <div className="flex items-center justify-between gap-3 flex-wrap">
                         <div className="flex items-center gap-3 overflow-hidden">
-                          <FileText className="w-4 h-4 text-cyan-400 shrink-0" />
+                          <FileText className={`w-4 h-4 shrink-0 ${isDisrupted ? 'text-rose-400' : 'text-cyan-400'}`} />
                           <div className="flex flex-col gap-1">
                             <div className="flex items-center gap-2 flex-wrap">
                               <span className="font-bold text-xs text-white truncate max-w-[280px] sm:max-w-[360px]">
@@ -2468,7 +2549,9 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
                                 {proj.format}
                               </span>
                               <span>•</span>
-                              <span>{proj.translatedCues} / {proj.totalCues} سطر ({pct}%)</span>
+                              <span className={isDisrupted ? 'text-rose-400 font-bold' : isIncomplete ? 'text-amber-400 font-bold' : ''}>
+                                {proj.translatedCues} / {proj.totalCues} سطر ({pct}%)
+                              </span>
                             </div>
                           </div>
                         </div>
@@ -2483,10 +2566,32 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
                             <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-amber-500/10 text-amber-400 border border-amber-500/20 animate-pulse">
                               در حال ترجمه ({pct}%)
                             </span>
+                          ) : isDisrupted ? (
+                            <span className="text-[10px] font-bold px-2.5 py-0.5 rounded-full bg-rose-500/20 text-rose-300 border border-rose-500/40 flex items-center gap-1">
+                              <AlertCircle className="w-3 h-3 text-rose-400" />
+                              <span>⚠️ دچار اختلال ({pct}%)</span>
+                            </span>
+                          ) : isIncomplete ? (
+                            <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/30">
+                              ترجمه ناقص ({pct}%)
+                            </span>
                           ) : (
                             <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-slate-800 text-slate-400 border border-slate-700">
                               {proj.status === 'queued' ? 'در صف' : 'آماده'}
                             </span>
+                          )}
+
+                          {/* Resume / Fix button if disrupted or incomplete */}
+                          {(isDisrupted || isIncomplete || proj.status === 'paused') && !isTranslating && (
+                            <button
+                              type="button"
+                              onClick={() => handleResumeProject(proj.id, proj.name)}
+                              className="flex items-center gap-1 px-2.5 py-1 text-[11px] font-bold text-amber-300 bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/30 rounded-lg transition-colors cursor-pointer"
+                              title="رفع خطا و ادامه ترجمه از آخرین سطر باقی‌مانده"
+                            >
+                              <RotateCcw className="w-3 h-3 text-amber-400" />
+                              <span>رفع خطا و ادامه</span>
+                            </button>
                           )}
 
                           {/* Single SRT */}
@@ -2548,11 +2653,34 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
                         </div>
                       </div>
 
+                      {/* Error / Disruption detail if present */}
+                      {proj.lastError && (
+                        <div className="bg-rose-500/10 border border-rose-500/30 rounded-xl p-2.5 text-[11px] text-rose-200 flex items-start justify-between gap-3 flex-wrap">
+                          <div className="flex items-start gap-2">
+                            <AlertCircle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
+                            <div className="flex flex-col gap-0.5">
+                              <span className="font-bold text-rose-300">گزارش وضعیت اختلال:</span>
+                              <span>{proj.lastError.includes('429') ? 'محدودیت سهمیه موقت کلید جمینای (429 Quota Exhausted)' : proj.lastError}</span>
+                              <span className="text-emerald-400 font-semibold text-[10px] mt-0.5">
+                                ✓ تمام سطرهای ترجمه شده ({proj.translatedCues} سطر) در دیتابیس سرور کاملاً محفوظ است.
+                              </span>
+                            </div>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => handleResumeProject(proj.id, proj.name)}
+                            className="px-3 py-1 bg-amber-500/20 hover:bg-amber-500/30 text-amber-300 border border-amber-500/40 rounded-lg text-xs font-bold cursor-pointer transition-colors"
+                          >
+                            رفع اختلال و تلاش مجدد
+                          </button>
+                        </div>
+                      )}
+
                       {/* Progress bar */}
                       <div className="w-full bg-slate-950 rounded-full h-1.5 overflow-hidden">
                         <div
                           className={`h-full rounded-full transition-all duration-300 ${
-                            isComplete ? 'bg-emerald-500' : 'bg-indigo-500'
+                            isComplete ? 'bg-emerald-500' : isDisrupted ? 'bg-rose-500' : 'bg-indigo-500'
                           }`}
                           style={{ width: `${pct}%` }}
                         />
@@ -3041,24 +3169,52 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
                 </div>
               </div>
 
+              {/* Concurrency: maxKeysPerProject */}
+              <div>
+                <label className="text-xs text-slate-300 font-semibold flex items-center justify-between mb-1">
+                  <span className="flex items-center gap-1.5">
+                    <Sparkles className="w-3.5 h-3.5 text-cyan-400" />
+                    <span>سقف کلید همزمان برای هر فایل (Max Keys Per File):</span>
+                  </span>
+                  <span className="text-xs font-mono font-bold text-cyan-300 px-2.5 py-0.5 rounded bg-slate-950 border border-slate-800">
+                    {serverConfig.maxKeysPerProject || 2} کلید {serverConfig.maxKeysPerProject === 2 ? '(پیش‌فرض بهینه)' : ''}
+                  </span>
+                </label>
+                <div className="flex items-center gap-4">
+                  <input
+                    type="range"
+                    min={1}
+                    max={4}
+                    step={1}
+                    value={serverConfig.maxKeysPerProject || 2}
+                    onChange={(e) => setServerConfig({ ...serverConfig, maxKeysPerProject: Number(e.target.value) })}
+                    className="w-full accent-cyan-500 h-2 bg-slate-800 rounded-lg cursor-pointer"
+                  />
+                  <span className="text-xs font-mono text-slate-300 shrink-0">۱ تا ۴ کلید</span>
+                </div>
+                <p className="text-[11px] text-slate-400 mt-1">
+                  هر فایل حداکثر از این تعداد کلید به صورت همزمان بهره می‌برد. به محض رسیدن به ۳۵ سطر پایانی فایل، کلید دوم/مازاد آزاد شده و فوراً در اختیار فایل بعدی قرار می‌گیرد.
+                </p>
+              </div>
+
               {/* Live Formula Preview Card */}
               {(() => {
                 const f = serverConfig.maxConcurrentProjects || 4;
                 const k = serverConfig.maxTotalParallelKeys || 8;
-                const perFile = Math.max(1, Math.floor(k / f));
+                const perFile = serverConfig.maxKeysPerProject || 2;
                 const cuesPerCall = perFile * 50;
 
                 return (
                   <div className="bg-gradient-to-r from-indigo-950/40 via-slate-950 to-amber-950/30 border border-indigo-500/30 rounded-xl p-3 text-xs flex flex-col gap-1.5">
                     <div className="flex items-center gap-2 font-bold text-amber-300">
                       <Zap className="w-3.5 h-3.5 text-amber-400" />
-                      <span>فرمول تخصیص موازی کلیدها به هر فایل:</span>
+                      <span>توزیع همزمان و آزادسازی هوشمند کلیدها:</span>
                     </div>
                     <p className="text-slate-300 text-[11px] leading-relaxed">
-                      با تنظیم <span className="text-white font-bold">{f} فایل</span> و <span className="text-amber-300 font-bold">{k} کلید</span>، روی هر فایل به طور خودکار <span className="text-emerald-300 font-bold font-mono">{perFile} کلید موازی</span> کار می‌کنند و در هر چرخه درخواست هوش مصنوعی، <span className="text-emerald-300 font-bold font-mono">{cuesPerCall} سطر</span> ترجمه می‌شوند.
+                      با <span className="text-white font-bold">{f} فایل همزمان</span> و <span className="text-amber-300 font-bold">{k} کلید فعال</span>، هر فایل با <span className="text-emerald-300 font-bold font-mono">{perFile} کلید اختصاصی</span> ({cuesPerCall} سطر در هر درخواست) با سرعت بالا ترجمه می‌شود.
                     </p>
-                    <p className="text-[10px] text-slate-400">
-                      تمامی سطرها دقیقاً با شماره ID و تایم‌کد اختصاصی در جای اصلی خود قرار می‌گیرند و هیچ‌گونه جابجایی رخ نمی‌دهد.
+                    <p className="text-[10px] text-cyan-300/90 bg-cyan-950/40 p-2 rounded-lg border border-cyan-800/40">
+                      ⚡ الگوریتم آزادسازی خودکار: برای ۲۰ سطر پایانی یک فایل نیازی به درگیر نگه‌داشتن کلیدهای اضافی نیست؛ سیستم کلید مازاد را فوراً به فایل بعدی تخصیص داده و همه فایل‌ها به صورت موازی به پیش می‌روند.
                     </p>
                   </div>
                 );

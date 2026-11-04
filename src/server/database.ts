@@ -25,6 +25,8 @@ export interface ServerSubtitleProject {
   tone: string;
   customPrompt?: string;
   status: ProjectStatus;
+  hasDisruption?: boolean;
+  maxKeys?: number;
   totalCues: number;
   translatedCues: number;
   currentBatchIndex: number;
@@ -47,8 +49,9 @@ export interface ServerSubtitleProject {
 export interface ServerConfig {
   allowedOrigin: string; // default '*'
   geminiBaseUrl: string; // default 'https://generativelanguage.googleapis.com'
-  maxConcurrentProjects: number; // default 4 (Active files concurrently translating)
-  maxTotalParallelKeys?: number; // default 8 (Total parallel key workers across files)
+  maxConcurrentProjects: number; // default 8 (Active files concurrently translating)
+  maxTotalParallelKeys?: number; // default 19 (Total parallel key workers across files)
+  maxKeysPerProject?: number; // default 2 (Max parallel keys assigned per single file)
 }
 
 export interface KeyUsageRecord {
@@ -471,6 +474,9 @@ export function getServerConfig(): ServerConfig {
   if (!db.serverConfig.maxConcurrentProjects || db.serverConfig.maxConcurrentProjects < 8) {
     db.serverConfig.maxConcurrentProjects = 8;
   }
+  if (!db.serverConfig.maxKeysPerProject || db.serverConfig.maxKeysPerProject < 1) {
+    db.serverConfig.maxKeysPerProject = 2;
+  }
   return db.serverConfig;
 }
 
@@ -492,6 +498,10 @@ export function updateServerConfig(updates: Partial<ServerConfig>): ServerConfig
   if (updates.maxTotalParallelKeys !== undefined) {
     const val = Number(updates.maxTotalParallelKeys);
     db.serverConfig.maxTotalParallelKeys = Math.max(1, Math.min(val || 8, 32));
+  }
+  if (updates.maxKeysPerProject !== undefined) {
+    const val = Number(updates.maxKeysPerProject);
+    db.serverConfig.maxKeysPerProject = Math.max(1, Math.min(val || 2, 8));
   }
   saveDatabaseSync();
   return db.serverConfig;
@@ -941,5 +951,39 @@ export function restoreBackupFileDirect(filePath: string): { success: boolean; f
 
 export function getDatabaseFilePath(): string {
   return DB_FILE;
+}
+
+export function retryDisruptedAndIncompleteProjects(folderId?: string): {
+  retriedCount: number;
+  projectNames: string[];
+} {
+  const db = getDatabase();
+  const retried: string[] = [];
+
+  db.projects.forEach((p) => {
+    if (folderId && p.folderId !== folderId) return;
+    if (p.status === 'completed' || p.status === 'paused') return;
+
+    const untranslatedCount = p.items.filter((i) => !i.translatedText || !i.translatedText.trim()).length;
+    const hasIssues = p.status === 'has_incomplete' || p.status === 'error' || Boolean(p.hasDisruption) || Boolean(p.lastError) || untranslatedCount > 0;
+
+    if (hasIssues) {
+      p.status = 'queued';
+      p.hasDisruption = false;
+      p.lastError = undefined;
+      p.errorMessage = undefined;
+      p.failedCueIds = [];
+      retried.push(p.name);
+    }
+  });
+
+  if (retried.length > 0) {
+    saveDatabaseSync();
+  }
+
+  return {
+    retriedCount: retried.length,
+    projectNames: retried,
+  };
 }
 
