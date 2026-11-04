@@ -645,19 +645,23 @@ export function rotateActiveKeyIndex(): number {
 // ─── Key Exhaustion & Cooldown Tracking ──────────────────────────────────────
 
 export const exhaustedKeysMap = new Map<string, { timestamp: number; reason: string }>();
-// 40 seconds cooldown (Gemini free tier rolling quota window resets every minute)
-const KEY_EXHAUSTION_COOLDOWN_MS = 40 * 1000;
+// 35 seconds cooldown (Gemini rolling window resets quickly)
+const KEY_EXHAUSTION_COOLDOWN_MS = 35 * 1000;
 
 export function markKeyAsExhausted(key: string, reason: string = 'Quota exhausted (429)'): void {
   exhaustedKeysMap.set(key, { timestamp: Date.now(), reason });
-  console.log(`[KeyPool] Key paused in cooldown: ${key.slice(0, 6)}... (${reason}). Cooldown: 60s.`);
+  console.log(`[KeyPool] Key ${key.slice(0, 6)}... quota limit reached (${reason}). Moved to END of pool (cooldown: 35s).`);
 
-  // Rotate this exhausted or busy key to the END of db.serverKeys so fresh active keys are immediately at front!
+  // FIFO Queue Rotation: Immediately move the exhausted key to the END of db.serverKeys
+  // so fresh, unexhausted keys are immediately at index 0 and picked up without delay!
   try {
     const db = getDatabase();
     if (Array.isArray(db.serverKeys) && db.serverKeys.includes(key) && db.serverKeys.length > 1) {
       db.serverKeys = db.serverKeys.filter((k) => k !== key);
       db.serverKeys.push(key);
+      if (db.activeKeyIndex >= db.serverKeys.length) {
+        db.activeKeyIndex = 0;
+      }
       saveDatabaseSync();
     }
   } catch {}
@@ -727,38 +731,28 @@ export function leaseAvailableKey(excludeKeys: string[] = []): { key: string; in
 
   const excludedSet = new Set(excludeKeys);
   const db = getDatabase();
-  const startIdx = (db.activeKeyIndex || 0) % allKeys.length;
 
-  // First pass: find key that is NOT exhausted and NOT in excludeKeys
+  // First pass: find first key in pool that is NOT exhausted and NOT currently busy (not in excludeKeys)
+  // Since exhausted keys are pushed to the end of allKeys, fresh and available keys are at the beginning!
   for (let i = 0; i < allKeys.length; i++) {
-    const candidateIdx = (startIdx + i) % allKeys.length;
-    const candidateKey = allKeys[candidateIdx];
+    const candidateKey = allKeys[i];
     if (!isKeyExhausted(candidateKey) && !excludedSet.has(candidateKey)) {
-      // Advance activeKeyIndex to candidateIdx + 1 for fair round-robin across all keys!
-      db.activeKeyIndex = (candidateIdx + 1) % allKeys.length;
-      return { key: candidateKey, index: candidateIdx, total: allKeys.length };
+      db.activeKeyIndex = (i + 1) % allKeys.length;
+      return { key: candidateKey, index: i, total: allKeys.length };
     }
   }
 
-  // Second pass: if all free keys are excluded, allow sharing if not exhausted
+  // Second pass: if all free keys are currently locked in flight, allow leasing another non-exhausted key
   for (let i = 0; i < allKeys.length; i++) {
-    const candidateIdx = (startIdx + i) % allKeys.length;
-    const candidateKey = allKeys[candidateIdx];
+    const candidateKey = allKeys[i];
     if (!isKeyExhausted(candidateKey)) {
-      db.activeKeyIndex = (candidateIdx + 1) % allKeys.length;
-      return { key: candidateKey, index: candidateIdx, total: allKeys.length };
+      db.activeKeyIndex = (i + 1) % allKeys.length;
+      return { key: candidateKey, index: i, total: allKeys.length };
     }
   }
 
-  // If ALL keys are exhausted, check cooldowns
-  const anyNonExhausted = allKeys.some((k) => !isKeyExhausted(k));
-  if (!anyNonExhausted) {
-    return null;
-  }
-
-  const nextIdx = (startIdx + 1) % allKeys.length;
-  db.activeKeyIndex = nextIdx;
-  return { key: allKeys[startIdx], index: startIdx, total: allKeys.length };
+  // All keys are exhausted
+  return null;
 }
 
 export function getActiveAvailableKey(): { key: string; index: number; total: number } | null {
@@ -962,10 +956,14 @@ export function retryDisruptedAndIncompleteProjects(folderId?: string): {
 
   db.projects.forEach((p) => {
     if (folderId && p.folderId !== folderId) return;
-    if (p.status === 'completed' || p.status === 'paused') return;
-
     const untranslatedCount = p.items.filter((i) => !i.translatedText || !i.translatedText.trim()).length;
     const hasIssues = p.status === 'has_incomplete' || p.status === 'error' || Boolean(p.hasDisruption) || Boolean(p.lastError) || untranslatedCount > 0;
+
+    // If all lines are actually translated, mark completed and skip
+    if (untranslatedCount === 0 && p.totalCues > 0) {
+      p.status = 'completed';
+      return;
+    }
 
     if (hasIssues) {
       p.status = 'queued';
