@@ -139,6 +139,8 @@ export interface KeyDetailItem {
   maskedKey: string;
   isExhausted: boolean;
   cooldownRemainingSec: number;
+  isDisabled?: boolean;
+  disabledReason?: string;
   requestsCount?: number;
   promptTokens?: number;
   candidatesTokens?: number;
@@ -225,10 +227,12 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
     allowedOrigin: '*',
     geminiBaseUrl: 'https://generativelanguage.googleapis.com',
     maxConcurrentProjects: 4,
-    maxTotalParallelKeys: 8,
-    maxKeysPerProject: 2,
+    maxTotalParallelKeys: 19,
+    maxKeysPerProject: 1,
   });
   const [isSavingConfig, setIsSavingConfig] = useState(false);
+  const [customConcurrentInput, setCustomConcurrentInput] = useState<string>('4');
+  const [fileFilter, setFileFilter] = useState<'all' | 'incomplete' | 'translating' | 'completed' | 'disrupted'>('all');
 
   // Server Info & Storage Location State
   const [serverInfo, setServerInfo] = useState<{
@@ -366,11 +370,14 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
     }
   };
 
-  const handleSetDualConcurrency = async (files?: number, keysPerProject?: number) => {
+  const handleSetDualConcurrency = async (files?: number, _keysPerProject?: number) => {
     try {
-      const payload: Record<string, any> = {};
-      if (files !== undefined) payload.maxConcurrentProjects = files;
-      if (keysPerProject !== undefined) payload.maxKeysPerProject = keysPerProject;
+      const targetFiles = files || serverConfig.maxConcurrentProjects || 4;
+      const validFiles = Math.max(1, Math.min(targetFiles, 50));
+      const payload: Record<string, any> = {
+        maxConcurrentProjects: validFiles,
+        maxKeysPerProject: 1, // Strictly 1 dedicated key per file
+      };
 
       const res = await fetch('/api/server/config', {
         method: 'POST',
@@ -380,16 +387,15 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
       const data = await res.json();
       if (data.success && data.config) {
         setServerConfig(data.config);
-        const f = data.config.maxConcurrentProjects || 4;
-        const kpp = data.config.maxKeysPerProject || 2;
-        onShowToast(`تنظیمات سرعت اعمال شد: ${f} فایل همزمان با ${kpp} کلید برای هر فایل (${f * kpp} کلید همزمان از استخر).`, 'success');
+        setCustomConcurrentInput(String(data.config.maxConcurrentProjects));
+        onShowToast(`ظرفیت همزمانی سرور تنظیم شد: دقیقاً ${data.config.maxConcurrentProjects} فایل همزمان (هر فایل ۱ کلید اختصاصی از استخر).`, 'success');
       }
     } catch {
       onShowToast('خطا در به‌روزرسانی تنظیمات سرور', 'error');
     }
   };
 
-  const handleSetConcurrency = (val: number) => handleSetDualConcurrency(val, undefined);
+  const handleSetConcurrency = (val: number) => handleSetDualConcurrency(val, 1);
 
   // Upload state
   const [isUploading, setIsUploading] = useState(false);
@@ -418,6 +424,7 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
       const data = await res.json();
       if (data.success && data.config) {
         setServerConfig(data.config);
+        setCustomConcurrentInput(String(data.config.maxConcurrentProjects || 4));
       }
     } catch {}
   };
@@ -1536,90 +1543,104 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
         </div>
       </div>
 
-      {/* Quick Concurrency Control Bar (مدیریت همزمان فایل‌ها و کلیدهای موازی) */}
-      <div className="w-full bg-slate-900/80 border border-indigo-500/20 rounded-2xl p-3.5 flex flex-col gap-3 shadow-lg text-xs">
-        {/* Row 1: Files & Keys-per-file controls (برداشتن کلیدهای فعال در چرخه و کنترل مستقیم با تعداد فایل و کلید هر فایل) */}
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-          {/* Files Selector */}
-          <div className="flex items-center gap-2 flex-wrap">
-            <span className="font-bold text-slate-200 flex items-center gap-1.5">
-              <FileText className="w-3.5 h-3.5 text-indigo-400" />
+      {/* Quick Concurrency Control Bar (مدیریت همزمان فایل‌ها با معماری دقیق ۱ فایل = ۱ کلید اختصاصی) */}
+      <div className="w-full bg-slate-900/90 border border-indigo-500/30 rounded-2xl p-4 flex flex-col gap-3 shadow-xl text-xs">
+        {/* Row 1: Strict 1-to-1 Concurrency Controls & Manual Input */}
+        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3">
+          {/* Files Selector with Quick Presets & Manual Input */}
+          <div className="flex items-center gap-2.5 flex-wrap">
+            <span className="font-bold text-white flex items-center gap-1.5 shrink-0">
+              <Zap className="w-4 h-4 text-amber-400" />
               <span>تعداد فایل‌های همزمان:</span>
             </span>
+
+            {/* Quick Presets */}
             <div className="flex items-center gap-1 flex-wrap">
-              {[1, 2, 4, 6, 8].map((num) => {
+              {[1, 2, 4, 6, 8, 10, 12, 14, 16, 18].map((num) => {
                 const isSelected = (serverConfig.maxConcurrentProjects || 4) === num;
                 return (
                   <button
                     key={num}
                     type="button"
-                    onClick={() => handleSetDualConcurrency(num, undefined)}
-                    className={`px-3 py-1.5 rounded-lg font-mono font-bold text-xs transition-all cursor-pointer ${
+                    onClick={() => handleSetDualConcurrency(num, 1)}
+                    className={`px-2.5 py-1.5 rounded-lg font-mono font-bold text-xs transition-all cursor-pointer ${
                       isSelected
-                        ? 'bg-indigo-600 text-white shadow-xs border border-indigo-400'
-                        : 'bg-slate-800 text-slate-400 hover:text-white hover:bg-slate-700 border border-slate-700/60'
+                        ? 'bg-indigo-600 text-white shadow-md shadow-indigo-600/30 border border-indigo-400'
+                        : 'bg-slate-800 text-slate-300 hover:text-white hover:bg-slate-700 border border-slate-700/60'
                     }`}
-                    title={`اجرای همزمان ${num} فایل زیرنویس`}
+                    title={`اجرای همزمان ${num} فایل زیرنویس با ${num} کلید اختصاصی`}
                   >
-                    {num} فایل
+                    {num}
                   </button>
                 );
               })}
+            </div>
+
+            {/* Interactive Manual Numeric Input for any arbitrary count (e.g. 10 files) */}
+            <div className="flex items-center gap-1.5 bg-slate-950 px-2 py-1 rounded-xl border border-indigo-500/40 shrink-0">
+              <span className="text-[11px] text-slate-400 font-semibold">ورود دستی:</span>
+              <input
+                type="number"
+                min={1}
+                max={50}
+                value={customConcurrentInput}
+                onChange={(e) => setCustomConcurrentInput(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === 'Enter') {
+                    const n = parseInt(customConcurrentInput, 10);
+                    if (!isNaN(n) && n > 0) handleSetDualConcurrency(n, 1);
+                  }
+                }}
+                className="w-14 bg-slate-900 border border-slate-700 text-center text-amber-300 font-mono font-bold text-xs rounded-lg py-1 focus:outline-none focus:border-indigo-400"
+                placeholder="۱۰"
+                title="تعداد فایل‌های همزمان را دستی وارد کنید (مثلاً ۱۰) و دکمه ثبت را بزنید"
+              />
+              <span className="text-[11px] text-slate-400">فایل</span>
+              <button
+                type="button"
+                onClick={() => {
+                  const n = parseInt(customConcurrentInput, 10);
+                  if (!isNaN(n) && n > 0) handleSetDualConcurrency(n, 1);
+                }}
+                className="px-2.5 py-1 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-xs font-bold transition-colors shadow-xs cursor-pointer"
+                title="ثبت و اعمال فوری تعداد فایل‌های همزمان"
+              >
+                ثبت
+              </button>
             </div>
           </div>
 
-          {/* Keys per file Selector */}
-          <div className="flex items-center gap-2 flex-wrap">
-            <span className="font-bold text-cyan-300 flex items-center gap-1.5">
+          {/* Strict 1-Key-Per-File Policy Badge */}
+          <div className="flex items-center gap-2 self-start lg:self-center">
+            <span className="text-[11px] font-bold px-3 py-1.5 rounded-xl bg-cyan-500/15 text-cyan-300 border border-cyan-500/30 flex items-center gap-1.5 shadow-xs">
               <Sparkles className="w-3.5 h-3.5 text-cyan-400" />
-              <span>تعداد کلید برای هر فایل:</span>
+              <span>معماری ۱:۱ فعال: هر فایل منحصراً ۱ کلید اختصاصی از استخر دریافت می‌کند</span>
             </span>
-            <div className="flex items-center gap-1 flex-wrap">
-              {[1, 2, 3, 4].map((num) => {
-                const isSelected = (serverConfig.maxKeysPerProject || 2) === num;
-                return (
-                  <button
-                    key={num}
-                    type="button"
-                    onClick={() => handleSetDualConcurrency(undefined, num)}
-                    className={`px-3 py-1.5 rounded-lg font-mono font-bold text-xs transition-all cursor-pointer ${
-                      isSelected
-                        ? 'bg-cyan-600 text-white shadow-xs border border-cyan-400'
-                        : 'bg-slate-800 text-slate-400 hover:text-cyan-200 hover:bg-slate-700 border border-slate-700/60'
-                    }`}
-                    title={`تخصیص حداکثر ${num} کلید موازی از استخر برای هر فایل`}
-                  >
-                    {num} کلید {num === 2 ? '(پیش‌فرض)' : ''}
-                  </button>
-                );
-              })}
-            </div>
           </div>
         </div>
 
         {/* Row 2: Live Speed & Pool Formula Badge */}
         {(() => {
           const files = serverConfig.maxConcurrentProjects || 4;
-          const keysPerFile = serverConfig.maxKeysPerProject || 2;
-          const totalKeySlots = files * keysPerFile;
+          const totalKeySlots = files;
 
           return (
             <div className="w-full pt-2.5 border-t border-slate-800/80 flex flex-wrap items-center justify-between gap-2 text-[11px]">
               <div className="flex items-center gap-2 flex-wrap text-slate-300">
                 <span className="text-amber-400 font-bold flex items-center gap-1">
                   <Zap className="w-3.5 h-3.5 text-amber-400" />
-                  <span>مدیریت استخر کلیدها:</span>
+                  <span>وضعیت استخر کلیدها:</span>
                 </span>
                 <span className="bg-slate-950 px-2.5 py-0.5 rounded-md border border-slate-800 text-white font-mono font-bold">
-                  {files} فایل همزمان × {keysPerFile} کلید = {totalKeySlots} پردازش موازی فعال از استخر ({serverKeysCount} کلید موجود)
+                  {files} فایل همزمان × ۱ کلید اختصاصی = {totalKeySlots} پردازش همزمان فعال ({serverKeysCount} کلید در استخر سرور)
                 </span>
                 <span>➔</span>
-                <span className="bg-amber-950/70 text-amber-300 border border-amber-500/30 px-2 py-0.5 rounded-md text-[11px]">
-                  🔄 چرخش خودکار FIFO: هر کلیدی اتمام سهمیه خورد فوراً به انتهای استخر منتقل و کلید آماده بعدی جایگزین می‌شود
+                <span className="bg-amber-950/70 text-amber-300 border border-amber-500/30 px-2.5 py-0.5 rounded-md text-[11px]">
+                  🔄 چرخش خودکار استخر: در صورت اتمام سهمیه (429) یا کلید غیرفعال (401)، فوراً کلید آزاد بعدی جایگزین می‌شود
                 </span>
                 <span>➔</span>
-                <span className="bg-emerald-950/70 text-emerald-300 border border-emerald-500/30 px-2 py-0.5 rounded-md text-[11px]">
-                  ✨ در ۳۵ سطر پایانی: فایل فقط با ۱ کلید ادامه می‌یابد و کلید مازاد فوراً به فایل‌های دیگر تعلق می‌گیرد
+                <span className="bg-emerald-950/70 text-emerald-300 border border-emerald-500/30 px-2.5 py-0.5 rounded-md text-[11px]">
+                  ✨ پیشرفت مستقل: هر ۱۰ فایل به صورت کاملاً مجزا و موازی پیش می‌روند و با اتمام هر فایل، فایل بعدی از صف کلید را می‌گیرد
                 </span>
               </div>
 
@@ -2199,6 +2220,92 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
               </span>
             </div>
 
+            {/* Filter Tabs & Incomplete Batch Resume Toolbar */}
+            {(() => {
+              const checkComplete = (p: ServerProjectItem) => p.status === 'completed' || (p.totalCues > 0 && p.translatedCues >= p.totalCues);
+              const checkTranslating = (p: ServerProjectItem) => workerStatus?.activeProjects?.some((ap) => ap.id === p.id) || false;
+              const checkDisrupted = (p: ServerProjectItem) => !checkComplete(p) && (Boolean(p.hasDisruption) || p.status === 'error' || Boolean(p.lastError));
+              const checkIncomplete = (p: ServerProjectItem) => !checkComplete(p) && (p.status === 'has_incomplete' || checkDisrupted(p) || (p.totalCues > 0 && p.translatedCues < p.totalCues));
+
+              const totalInc = projects.filter(checkIncomplete).length;
+              const totalTr = projects.filter(checkTranslating).length;
+              const totalComp = projects.filter(checkComplete).length;
+
+              return (
+                <div className="flex flex-wrap items-center justify-between gap-2.5 bg-slate-900/90 p-2.5 rounded-2xl border border-slate-800 text-xs">
+                  <div className="flex items-center gap-1.5 flex-wrap">
+                    <button
+                      type="button"
+                      onClick={() => setFileFilter('all')}
+                      className={`px-3 py-1.5 rounded-xl font-bold transition-all cursor-pointer ${
+                        fileFilter === 'all'
+                          ? 'bg-indigo-600 text-white shadow-xs'
+                          : 'bg-slate-800/80 text-slate-300 hover:text-white hover:bg-slate-800'
+                      }`}
+                    >
+                      همه ({projects.length})
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => setFileFilter('incomplete')}
+                      className={`px-3 py-1.5 rounded-xl font-bold transition-all flex items-center gap-1.5 cursor-pointer ${
+                        fileFilter === 'incomplete'
+                          ? 'bg-amber-500 text-slate-950 font-black shadow-xs'
+                          : 'bg-amber-500/15 text-amber-300 hover:bg-amber-500/25 border border-amber-500/30'
+                      }`}
+                      title="فیلتر فقط فایل‌هایی که هنوز ۱۰۰٪ ترجمه نشده‌اند"
+                    >
+                      <AlertCircle className="w-3.5 h-3.5" />
+                      <span>فایل‌های ناقص</span>
+                      <span className={`px-1.5 py-0.2 rounded-full text-[10px] font-mono font-bold ${fileFilter === 'incomplete' ? 'bg-slate-950 text-amber-400' : 'bg-amber-400/20 text-amber-300'}`}>
+                        {totalInc}
+                      </span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => setFileFilter('translating')}
+                      className={`px-3 py-1.5 rounded-xl font-bold transition-all flex items-center gap-1.5 cursor-pointer ${
+                        fileFilter === 'translating'
+                          ? 'bg-cyan-600 text-white shadow-xs'
+                          : 'bg-slate-800/80 text-slate-300 hover:text-white hover:bg-slate-800'
+                      }`}
+                    >
+                      <Loader2 className={`w-3.5 h-3.5 ${totalTr > 0 ? 'animate-spin text-cyan-400' : ''}`} />
+                      <span>در حال ترجمه ({totalTr})</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => setFileFilter('completed')}
+                      className={`px-3 py-1.5 rounded-xl font-bold transition-all flex items-center gap-1.5 cursor-pointer ${
+                        fileFilter === 'completed'
+                          ? 'bg-emerald-600 text-white shadow-xs'
+                          : 'bg-slate-800/80 text-slate-300 hover:text-white hover:bg-slate-800'
+                      }`}
+                    >
+                      <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+                      <span>تکمیل شده ({totalComp})</span>
+                    </button>
+                  </div>
+
+                  {totalInc > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => handleRetryIncomplete(selectedFolderId)}
+                      disabled={isRetryingIncomplete}
+                      className="flex items-center gap-1.5 px-3.5 py-1.5 bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-400 hover:to-amber-500 text-slate-950 font-black rounded-xl shadow-md transition-all cursor-pointer"
+                      title="قرار دادن تمام فایل‌های ناقص در صف و ترجمه سریع سطرهای باقی‌مانده آن‌ها بدون اتلاف وقت"
+                    >
+                      {isRetryingIncomplete ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RotateCcw className="w-3.5 h-3.5" />}
+                      <span>تکمیل فوری {totalInc} فایل ناقص</span>
+                    </button>
+                  )}
+                </div>
+              );
+            })()}
+
             {loadingProjects ? (
               <div className="py-16 flex items-center justify-center text-slate-400 text-xs gap-2">
                 <Loader2 className="w-5 h-5 animate-spin text-indigo-400" />
@@ -2215,14 +2322,26 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
             ) : (
               <div className="flex flex-col gap-3">
                 {projects
-                  .filter((p) => !searchQuery.trim() || p.name.toLowerCase().includes(searchQuery.toLowerCase()))
+                  .filter((p) => {
+                    if (searchQuery.trim() && !p.name.toLowerCase().includes(searchQuery.toLowerCase())) return false;
+                    const isComp = p.status === 'completed' || (p.totalCues > 0 && p.translatedCues >= p.totalCues);
+                    const isTr = workerStatus?.activeProjects?.some((ap) => ap.id === p.id) || false;
+                    const isDisr = !isComp && (Boolean(p.hasDisruption) || p.status === 'error' || Boolean(p.lastError));
+                    const isInc = !isComp && (p.status === 'has_incomplete' || isDisr || (p.totalCues > 0 && p.translatedCues < p.totalCues));
+
+                    if (fileFilter === 'incomplete') return isInc;
+                    if (fileFilter === 'translating') return isTr;
+                    if (fileFilter === 'completed') return isComp;
+                    return true;
+                  })
                   .map((proj) => {
                     const isComplete = proj.status === 'completed' || (proj.totalCues > 0 && proj.translatedCues >= proj.totalCues);
-                    const isTranslating = proj.status === 'translating';
-                    const isQueued = proj.status === 'queued';
+                    // Accurately show isTranslating IF AND ONLY IF worker is actively running this project
+                    const isTranslating = workerStatus?.activeProjects?.some((ap) => ap.id === proj.id) || false;
+                    const isDisrupted = !isComplete && (Boolean(proj.hasDisruption) || proj.status === 'error' || Boolean(proj.lastError));
+                    const isIncomplete = !isComplete && (proj.status === 'has_incomplete' || isDisrupted || (proj.totalCues > 0 && proj.translatedCues < proj.totalCues));
+                    const isQueued = !isComplete && !isTranslating && (proj.status === 'queued' || proj.status === 'translating');
                     const isWaitingKeys = proj.status === 'waiting_for_keys';
-                    const isDisrupted = Boolean(proj.hasDisruption) || proj.status === 'error' || (Boolean(proj.lastError) && !isComplete);
-                    const isIncomplete = proj.status === 'has_incomplete' || (!isComplete && !isTranslating && !isQueued && !isWaitingKeys && proj.translatedCues > 0 && proj.translatedCues < proj.totalCues);
                     const pct = isComplete ? 100 : (proj.totalCues > 0 ? Math.min(99, Math.floor((proj.translatedCues / proj.totalCues) * 100)) : 0);
 
                     return (
@@ -2459,6 +2578,92 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
             </span>
           </div>
 
+          {/* Filter Tabs & Incomplete Batch Resume Toolbar for All Files */}
+          {(() => {
+            const checkComplete = (p: ServerProjectItem) => p.status === 'completed' || (p.totalCues > 0 && p.translatedCues >= p.totalCues);
+            const checkTranslating = (p: ServerProjectItem) => workerStatus?.activeProjects?.some((ap) => ap.id === p.id) || false;
+            const checkDisrupted = (p: ServerProjectItem) => !checkComplete(p) && (Boolean(p.hasDisruption) || p.status === 'error' || Boolean(p.lastError));
+            const checkIncomplete = (p: ServerProjectItem) => !checkComplete(p) && (p.status === 'has_incomplete' || checkDisrupted(p) || (p.totalCues > 0 && p.translatedCues < p.totalCues));
+
+            const totalInc = allProjects.filter(checkIncomplete).length;
+            const totalTr = allProjects.filter(checkTranslating).length;
+            const totalComp = allProjects.filter(checkComplete).length;
+
+            return (
+              <div className="flex flex-wrap items-center justify-between gap-2.5 bg-slate-900/90 p-2.5 rounded-2xl border border-slate-800 text-xs">
+                <div className="flex items-center gap-1.5 flex-wrap">
+                  <button
+                    type="button"
+                    onClick={() => setFileFilter('all')}
+                    className={`px-3 py-1.5 rounded-xl font-bold transition-all cursor-pointer ${
+                      fileFilter === 'all'
+                        ? 'bg-indigo-600 text-white shadow-xs'
+                        : 'bg-slate-800/80 text-slate-300 hover:text-white hover:bg-slate-800'
+                    }`}
+                  >
+                    همه ({allProjects.length})
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setFileFilter('incomplete')}
+                    className={`px-3 py-1.5 rounded-xl font-bold transition-all flex items-center gap-1.5 cursor-pointer ${
+                      fileFilter === 'incomplete'
+                        ? 'bg-amber-500 text-slate-950 font-black shadow-xs'
+                        : 'bg-amber-500/15 text-amber-300 hover:bg-amber-500/25 border border-amber-500/30'
+                    }`}
+                    title="فیلتر فقط فایل‌هایی که هنوز ۱۰۰٪ تکمیل نشده‌اند"
+                  >
+                    <AlertCircle className="w-3.5 h-3.5" />
+                    <span>فایل‌های ناقص</span>
+                    <span className={`px-1.5 py-0.2 rounded-full text-[10px] font-mono font-bold ${fileFilter === 'incomplete' ? 'bg-slate-950 text-amber-400' : 'bg-amber-400/20 text-amber-300'}`}>
+                      {totalInc}
+                    </span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setFileFilter('translating')}
+                    className={`px-3 py-1.5 rounded-xl font-bold transition-all flex items-center gap-1.5 cursor-pointer ${
+                      fileFilter === 'translating'
+                        ? 'bg-cyan-600 text-white shadow-xs'
+                        : 'bg-slate-800/80 text-slate-300 hover:text-white hover:bg-slate-800'
+                    }`}
+                  >
+                    <Loader2 className={`w-3.5 h-3.5 ${totalTr > 0 ? 'animate-spin text-cyan-400' : ''}`} />
+                    <span>در حال ترجمه ({totalTr})</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => setFileFilter('completed')}
+                    className={`px-3 py-1.5 rounded-xl font-bold transition-all flex items-center gap-1.5 cursor-pointer ${
+                      fileFilter === 'completed'
+                        ? 'bg-emerald-600 text-white shadow-xs'
+                        : 'bg-slate-800/80 text-slate-300 hover:text-white hover:bg-slate-800'
+                    }`}
+                  >
+                    <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+                    <span>تکمیل شده ({totalComp})</span>
+                  </button>
+                </div>
+
+                {totalInc > 0 && (
+                  <button
+                    type="button"
+                    onClick={() => handleRetryIncomplete(undefined)}
+                    disabled={isRetryingIncomplete}
+                    className="flex items-center gap-1.5 px-3.5 py-1.5 bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-400 hover:to-amber-500 text-slate-950 font-black rounded-xl shadow-md transition-all cursor-pointer"
+                    title="قرار دادن تمام فایل‌های ناقص در صف و تکمیل سریع سطرهای باقی‌مانده آن‌ها"
+                  >
+                    {isRetryingIncomplete ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RotateCcw className="w-3.5 h-3.5" />}
+                    <span>تکمیل فوری {totalInc} فایل ناقص</span>
+                  </button>
+                )}
+              </div>
+            );
+          })()}
+
           {loadingAllProjects ? (
             <div className="py-20 flex flex-col items-center justify-center text-slate-400 text-xs gap-3">
               <Loader2 className="w-6 h-6 animate-spin text-cyan-400" />
@@ -2472,16 +2677,25 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
             <div className="flex flex-col gap-3">
               {allProjects
                 .filter((p) => {
-                  if (!searchQuery.trim()) return true;
-                  const q = searchQuery.toLowerCase();
-                  return p.name.toLowerCase().includes(q) || (p.folderName && p.folderName.toLowerCase().includes(q));
+                  const matchesSearch = !searchQuery.trim() || p.name.toLowerCase().includes(searchQuery.toLowerCase()) || (p.folderName && p.folderName.toLowerCase().includes(searchQuery.toLowerCase()));
+                  if (!matchesSearch) return false;
+
+                  const isComp = p.status === 'completed' || (p.totalCues > 0 && p.translatedCues >= p.totalCues);
+                  const isTr = workerStatus?.activeProjects?.some((ap) => ap.id === p.id) || false;
+                  const isDisr = !isComp && (Boolean(p.hasDisruption) || p.status === 'error' || Boolean(p.lastError));
+                  const isInc = !isComp && (p.status === 'has_incomplete' || isDisr || (p.totalCues > 0 && p.translatedCues < p.totalCues));
+
+                  if (fileFilter === 'incomplete') return isInc;
+                  if (fileFilter === 'translating') return isTr;
+                  if (fileFilter === 'completed') return isComp;
+                  return true;
                 })
                 .map((proj) => {
                   const isComplete = proj.status === 'completed' || (proj.totalCues > 0 && proj.translatedCues >= proj.totalCues);
                   const pct = isComplete ? 100 : (proj.totalCues > 0 ? Math.min(99, Math.floor((proj.translatedCues / proj.totalCues) * 100)) : 0);
-                  const isTranslating = proj.status === 'translating';
-                  const isDisrupted = Boolean(proj.hasDisruption) || proj.status === 'error' || (Boolean(proj.lastError) && !isComplete);
-                  const isIncomplete = proj.status === 'has_incomplete' || (!isComplete && !isTranslating && proj.status !== 'queued' && proj.status !== 'waiting_for_keys' && proj.translatedCues > 0 && proj.translatedCues < proj.totalCues);
+                  const isTranslating = workerStatus?.activeProjects?.some((ap) => ap.id === proj.id) || false;
+                  const isDisrupted = !isComplete && (Boolean(proj.hasDisruption) || proj.status === 'error' || Boolean(proj.lastError));
+                  const isIncomplete = !isComplete && (proj.status === 'has_incomplete' || isDisrupted || (proj.totalCues > 0 && proj.translatedCues < proj.totalCues));
 
                   return (
                     <div
@@ -3396,8 +3610,13 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
                               </div>
 
                               <div className="flex items-center gap-3 text-[10px] text-slate-400 mt-0.5">
-                                {k.isExhausted ? (
-                                  <span className="flex items-center gap-1 text-rose-400 font-semibold">
+                                {k.isDisabled ? (
+                                  <span className="flex items-center gap-1 text-rose-400 font-bold bg-rose-500/15 px-2 py-0.5 rounded-md border border-rose-500/30">
+                                    <AlertCircle className="w-3 h-3 text-rose-400" />
+                                    <span>غیرفعال (۴۰۱ - حذف‌شده یا فاقد دسترسی در گوگل)</span>
+                                  </span>
+                                ) : k.isExhausted ? (
+                                  <span className="flex items-center gap-1 text-amber-400 font-semibold bg-amber-500/10 px-2 py-0.5 rounded-md border border-amber-500/20">
                                     <Clock className="w-3 h-3" />
                                     <span>وقفه سهمیه ({k.cooldownRemainingSec}s مانده)</span>
                                   </span>

@@ -57,6 +57,8 @@ import {
   resetKeyStats,
   auditAndFixEnglishCues,
   retryDisruptedAndIncompleteProjects,
+  getDisabledKeysList,
+  clearAllDisabledKeys,
   ServerSubtitleProject
 } from './src/server/database';
 import {
@@ -2784,11 +2786,32 @@ app.get('/api/server/keys', (req, res) => {
     const allKeys = getServerKeys();
     const details = getServerKeysWithDetails();
     const masked = details.map((d) => d.maskedKey);
+    const disabledList = getDisabledKeysList();
     return res.json({
       success: true,
       count: allKeys.length,
       keys: masked,
       details,
+      disabledKeysCount: disabledList.length,
+      disabledKeys: disabledList.map((d) => ({
+        maskedKey: d.key.length > 8 ? d.key.substring(0, 4) + '...' + d.key.substring(d.key.length - 4) : '****',
+        reason: d.reason,
+        timestamp: d.timestamp,
+      })),
+    });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message });
+  }
+});
+
+// 17b. Clear disabled keys registry
+app.post('/api/server/keys/clear-disabled', (req, res) => {
+  try {
+    clearAllDisabledKeys();
+    return res.json({
+      success: true,
+      message: 'فهرست کلیدهای غیرفعال شده پاکسازی شد.',
+      details: getServerKeysWithDetails(),
     });
   } catch (err: any) {
     return res.status(500).json({ success: false, error: err?.message });
