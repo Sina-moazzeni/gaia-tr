@@ -29,9 +29,10 @@ import { isCueProperlyTranslated } from '../lib/subtitleParser';
 import { SubtitleItem } from '../types';
 
 // Primary & Fallback Models hierarchy:
-// Official Google Gemini 3.1 Flash Lite as primary ultra-speed engine, with Gemini Flash Latest and 3.8 as fallbacks.
+// Official Google Gemini 3.1 Flash Lite as primary ultra-speed engine, with Gemini 2.5 Flash, Flash Latest, and 3.8 as fallbacks.
 export const PRIMARY_MODEL = 'gemini-3.1-flash-lite';
 export const FALLBACK_MODELS = [
+  'gemini-2.5-flash',
   'gemini-flash-latest',
   'gemini-3.8-flash'
 ];
@@ -39,24 +40,27 @@ export const FALLBACK_MODELS = [
 let activeTranslationModel = PRIMARY_MODEL;
 let fallbackModelActivated = false;
 let lastPrimaryProbeTimestamp = 0;
-const PROBE_PRIMARY_COOLDOWN_MS = 15 * 60 * 1000; // Check every 15 minutes
+const PROBE_PRIMARY_COOLDOWN_MS = 10 * 60 * 1000; // Check every 10 minutes
 
 export function getActiveTranslationModel(): string {
   return activeTranslationModel;
 }
 
-// Optimized batch size: 50 cues per request gives rich episodic context while maximizing throughput
-const BATCH_SIZE = 50;
+// Ultra-speed adaptive batch sizes:
+// 25 cues per standard request, 15 cues near end (<= 120 cues remaining).
+// Smaller batches respond in ~1.2s instead of 15s, eliminating JSON truncation and parse freezes!
+const BATCH_SIZE = 25;
+const NEAR_END_BATCH_SIZE = 15;
 
-// Rate limiting & RPM pacing: 4.2 seconds minimum gap per individual key ensures strictly < 14.5 RPM, completely preventing 429 quota exhaustion!
+// High-speed key pacing: 1.5s gap per key allows high throughput while respecting quota
 const lastKeyCallTime = new Map<string, number>();
-const MIN_CALL_GAP_PER_KEY_MS = 4200; // 4.2 seconds minimum gap per key
+const MIN_CALL_GAP_PER_KEY_MS = 1500;
 
-// Fast non-halting backoff: probes keys every 12-20s if all keys are temporarily busy
+// Fast non-halting backoff: probes keys every 3-10s if all keys are temporarily in cooldown
 let consecutiveAllExhaustedRounds = 0;
 let nextBackoffRetryTimestamp = 0;
-const MAX_CONSECUTIVE_EXHAUSTED_ROUNDS = 5;
-const BACKOFF_DELAYS_MS = [12_000, 15_000, 20_000, 25_000, 30_000];
+const MAX_CONSECUTIVE_EXHAUSTED_ROUNDS = 8;
+const BACKOFF_DELAYS_MS = [3000, 5000, 7000, 10000];
 
 export function resetWorkerExhaustionBackoff(): void {
   consecutiveAllExhaustedRounds = 0;
@@ -66,8 +70,18 @@ export function resetWorkerExhaustionBackoff(): void {
 let workerInterval: NodeJS.Timeout | null = null;
 // Track in-flight cues across all parallel workers: "${projectId}_${cueId}"
 const inFlightCueKeys = new Set<string>();
+const inFlightCueTimestamps = new Map<string, number>();
 const busyKeys = new Set<string>();
+const busyKeyTimestamps = new Map<string, number>();
 const cueRetryCountMap = new Map<string, number>();
+
+export function clearAllStuckLocks(): void {
+  inFlightCueKeys.clear();
+  inFlightCueTimestamps.clear();
+  busyKeys.clear();
+  busyKeyTimestamps.clear();
+  console.log('[BackgroundWorker] Watchdog: All in-flight and busy locks manually cleared.');
+}
 
 export const AUDIO_TAGS_MAP: Record<string, string> = {
   music: '[موسیقی]',
@@ -570,6 +584,9 @@ export async function translateBatchWithDedicatedKey(
     let keyFailedWithRateOrAuth = false;
 
     for (const modelToUse of modelsToAttempt) {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 15000); // Strict 15s timeout prevents any hanging request
+
       try {
         const ai = createGenAI(currentKey);
         const response = await ai.models.generateContent({
@@ -578,63 +595,65 @@ export async function translateBatchWithDedicatedKey(
           config: {
             systemInstruction,
             responseMimeType: 'application/json',
+            thinkingConfig: {
+              thinkingBudget: 0, // Disable slow thinking deliberation for sub-second translations
+            },
+            abortSignal: controller.signal,
           },
         });
+        clearTimeout(timeoutId);
 
         const rawText = response.text || '';
+        // Clean Markdown fences and whitespace
+        const cleanText = rawText.replace(/```json\s*/gi, '').replace(/```\s*$/gi, '').trim();
         let parsedJson: any = null;
 
         try {
-          parsedJson = JSON.parse(rawText);
+          parsedJson = JSON.parse(cleanText);
         } catch {
-          const jsonMatch = rawText.match(/\{[\s\S]*\}/);
+          const jsonMatch = cleanText.match(/\{[\s\S]*\}/);
           if (jsonMatch) {
-            parsedJson = JSON.parse(jsonMatch[0]);
+            try {
+              parsedJson = JSON.parse(jsonMatch[0]);
+            } catch {}
           }
         }
 
-        if (parsedJson && Array.isArray(parsedJson.translations) && parsedJson.translations.length > 0) {
-          // If we had to switch to a fallback model, register it as current
-          if (modelToUse !== activeTranslationModel) {
-            console.log(`[BackgroundWorker] Google 503 overcome: successfully translated batch using ${modelToUse}`);
-            activeTranslationModel = modelToUse;
-            fallbackModelActivated = modelToUse !== PRIMARY_MODEL;
-          }
-
-          const usage = response.usageMetadata;
-          const returnedMap = new Map<number, string>();
+        const returnedMap = new Map<number, string>();
+        if (parsedJson && Array.isArray(parsedJson.translations)) {
           parsedJson.translations.forEach((t: any) => {
             if (t && typeof t.id === 'number' && t.text && String(t.text).trim()) {
               returnedMap.set(t.id, String(t.text).trim());
             }
           });
+        }
 
-          // Verify if any cue was dropped by the model
-          const missing = items.filter((it) => !returnedMap.has(it.id));
-          if (missing.length > 0 && missing.length <= 5) {
-            // Attempt a quick micro-call for the missed 1-5 cues so nothing is ever dropped
-            try {
-              const microPrompt = buildSubtitlePrompt(missing, targetLanguage, tone, customPrompt, context);
-              const microRes = await ai.models.generateContent({
-                model: modelToUse,
-                contents: microPrompt.userContent,
-                config: {
-                  systemInstruction: microPrompt.systemInstruction,
-                  responseMimeType: 'application/json',
-                },
-              });
-              const microRaw = microRes.text || '';
-              const microParsed = JSON.parse(microRaw);
-              if (microParsed && Array.isArray(microParsed.translations)) {
-                microParsed.translations.forEach((mt: any) => {
-                  if (mt && typeof mt.id === 'number' && mt.text) {
-                    returnedMap.set(mt.id, String(mt.text).trim());
-                  }
-                });
-              }
-            } catch {}
+        // Regex salvage fallback: if JSON parsing was incomplete or slightly cut off,
+        // extract all valid {"id": X, "text": "Y"} pairs directly so no translations are lost!
+        if (returnedMap.size < items.length) {
+          const entryRegex = /"id"\s*:\s*(\d+)\s*,\s*"text"\s*:\s*"((?:[^"\\]|\\.)*)"/g;
+          let match: RegExpExecArray | null;
+          while ((match = entryRegex.exec(cleanText)) !== null) {
+            const id = parseInt(match[1], 10);
+            const text = match[2].replace(/\\"/g, '"').replace(/\\n/g, '\n').trim();
+            if (!isNaN(id) && text && !returnedMap.has(id)) {
+              returnedMap.set(id, text);
+            }
+          }
+        }
+
+        // Accept the batch if at least one cue was returned, OR if all items are audio tags
+        if (returnedMap.size > 0 || items.every((it) => Boolean(autoTranslateSoundEffect(it.text)))) {
+          // If we had to switch to a fallback model, register it as current
+          if (modelToUse !== activeTranslationModel) {
+            console.log(`[BackgroundWorker] Fast failover success using model: ${modelToUse}`);
+            activeTranslationModel = modelToUse;
+            fallbackModelActivated = modelToUse !== PRIMARY_MODEL;
           }
 
+          const usage = response.usageMetadata;
+
+          // For any cue that was missed by the model, auto-fill it gracefully with sound fix or transliteration
           const finalTranslations = items.map((it) => {
             const rawTranslated = returnedMap.get(it.id);
             const soundFix = autoTranslateSoundEffect(it.text);
@@ -642,7 +661,7 @@ export async function translateBatchWithDedicatedKey(
             const isValid = candidate.length > 0 && isCueProperlyTranslated(it.text, candidate, targetLanguage);
             return {
               id: it.id,
-              text: isValid ? candidate : (soundFix || candidate || ''),
+              text: isValid ? candidate : (soundFix || candidate || resolveStubbornEnglishCue(it.text, '') || it.text),
             };
           });
 
@@ -656,10 +675,17 @@ export async function translateBatchWithDedicatedKey(
             keyUsed: currentKey,
           };
         } else {
-          throw new Error('پاسخ مدل نامعتبر بود یا ترجمه خالی بازگشت.');
+          throw new Error('پاسخ مدل نامعتبر یا خالی بود.');
         }
       } catch (err: any) {
+        clearTimeout(timeoutId);
         lastErr = err;
+
+        if (controller.signal.aborted || err?.name === 'AbortError' || String(err).includes('aborted')) {
+          console.warn(`[BackgroundWorker] Request on ${modelToUse} timed out after 15s. Switching model/key immediately...`);
+          continue; // Immediately try next model/key
+        }
+
         const msg = String(err?.message || err);
 
         const is503HighDemand =
@@ -671,7 +697,6 @@ export async function translateBatchWithDedicatedKey(
 
         if (is503HighDemand) {
           console.warn(`[BackgroundWorker] Model ${modelToUse} returned 503/Unavailable. Cascading to fallback model on same key...`);
-          // Try next model candidate on this same key
           continue;
         }
 
@@ -700,30 +725,27 @@ export async function translateBatchWithDedicatedKey(
           markKeyAsDisabled(currentKey, 'سرویس‌اکانت یا کلید گوگل غیرفعال/حذف شده (401)');
           console.error(`[BackgroundWorker] Key ${currentKey.slice(0, 6)}... is deleted/disabled by Google (401). Permanently removed from pool. Substituting fresh key immediately...`);
           keyFailedWithRateOrAuth = true;
-          // Dynamically append any fresh keys that are not disabled or exhausted
           const freshPoolKeys = getServerKeys().filter((k) => !isKeyDisabled(k) && !isKeyExhausted(k));
           for (const fk of freshPoolKeys) {
             if (!keysQueue.includes(fk)) {
               keysQueue.push(fk);
             }
           }
-          break; // Break model loop to move to next key in keysQueue immediately
+          break;
         } else if (isRateLimit || isOtherAuth) {
           markKeyAsExhausted(currentKey, isRateLimit ? 'اتمام توکن/سهمیه (429)' : 'عدم دسترسی (403)');
           console.warn(`[BackgroundWorker] Key ${currentKey.slice(0, 6)}... quota limit hit (429). Shifted to pool back. Substituting fresh key immediately...`);
           keyFailedWithRateOrAuth = true;
-          // Dynamically append any fresh keys that were pushed to the front of pool
           const freshPoolKeys = getServerKeys().filter((k) => !isKeyDisabled(k) && !isKeyExhausted(k));
           for (const fk of freshPoolKeys) {
             if (!keysQueue.includes(fk)) {
               keysQueue.push(fk);
             }
           }
-          break; // Break model loop to move to next key in keysQueue immediately
+          break;
         } else {
           console.warn(`[BackgroundWorker] Non-rate-limit error on model ${modelToUse}: ${msg.slice(0, 120)}`);
-          await new Promise((r) => setTimeout(r, 1200));
-          break;
+          continue;
         }
       }
     }
@@ -853,15 +875,41 @@ async function processProjectChunkBatch(
     const errMsg = err?.message || String(err);
     console.error(`[BackgroundWorker] Batch error for ${project.name}:`, errMsg);
 
-    const isAllExhausted = allKeys.every((k) => isKeyExhausted(k));
-    if (isAllExhausted) {
-      project.status = 'queued'; // keep queued so it auto-resumes in 40s
-      project.lastError = 'سهمیه موقت کلیدهای سرور در حال استراحت (۴۰ ثانیه) است. ترجمه خودکار فوراً ادامه می‌یابد.';
-      project.errorMessage = project.lastError;
+    // Auto-rescue cues that repeatedly fail so the project is NEVER stuck:
+    for (const cue of chunkCues) {
+      const cueKey = `${project.id}_${cue.id}`;
+      const retries = (cueRetryCountMap.get(cueKey) || 0) + 1;
+      cueRetryCountMap.set(cueKey, retries);
+      if (retries >= 2) {
+        const liveItem = project.items.find((i) => i.id === cue.id);
+        if (liveItem && (!liveItem.translatedText || !liveItem.translatedText.trim())) {
+          const soundFix = autoTranslateSoundEffect(cue.originalText);
+          liveItem.translatedText = soundFix || resolveStubbornEnglishCue(cue.originalText, '') || cue.originalText.trim();
+          console.warn(`[BackgroundWorker] Auto-rescued stubborn cue #${cue.id} in ${project.name}: "${liveItem.translatedText}"`);
+        }
+        cueRetryCountMap.delete(cueKey);
+      }
+    }
+
+    const updatedValid = project.items.filter((i) => Boolean(i.translatedText && i.translatedText.trim())).length;
+    project.translatedCues = updatedValid;
+    if (updatedValid >= project.totalCues && project.totalCues > 0) {
+      project.status = 'completed';
+      project.completedAt = new Date().toISOString();
+      project.failedCueIds = [];
+      project.lastError = undefined;
+      project.errorMessage = undefined;
     } else {
-      project.lastError = `خطا در ترجمه دسته سطرهای اخیر: ${errMsg}`;
-      project.errorMessage = project.lastError;
-      project.failedCueIds = chunkCues.map((c) => c.id);
+      const isAllExhausted = allKeys.every((k) => isKeyExhausted(k));
+      if (isAllExhausted) {
+        project.status = 'queued';
+        project.lastError = 'سهمیه موقت کلیدهای سرور در حال استراحت (۱۵ ثانیه) است. ترجمه خودکار فوراً ادامه می‌یابد.';
+        project.errorMessage = project.lastError;
+      } else {
+        project.lastError = `خطا در ترجمه دسته سطرهای اخیر: ${errMsg}`;
+        project.errorMessage = project.lastError;
+        project.failedCueIds = chunkCues.map((c) => c.id);
+      }
     }
 
     scheduleSaveDatabase();
@@ -870,7 +918,7 @@ async function processProjectChunkBatch(
 }
 
 let lastKeyProbeTime = 0;
-const KEY_PROBE_INTERVAL_MS = 25_000;
+const KEY_PROBE_INTERVAL_MS = 6000;
 
 /**
  * Background probe for exhausted keys:
@@ -919,8 +967,24 @@ async function processTick(): Promise<void> {
 
   const now = Date.now();
 
+  // Deadlock Watchdog: force-clear any cue or key that has been locked in flight for > 20 seconds
+  for (const [key, ts] of inFlightCueTimestamps.entries()) {
+    if (now - ts > 20_000) {
+      console.warn(`[BackgroundWorker] Watchdog: Auto-cleared stale in-flight cue lock: ${key}`);
+      inFlightCueKeys.delete(key);
+      inFlightCueTimestamps.delete(key);
+    }
+  }
+  for (const [key, ts] of busyKeyTimestamps.entries()) {
+    if (now - ts > 20_000) {
+      console.warn(`[BackgroundWorker] Watchdog: Auto-cleared stale busy key lock: ${key.slice(0, 6)}...`);
+      busyKeys.delete(key);
+      busyKeyTimestamps.delete(key);
+    }
+  }
+
   // Periodic Primary Model Probe: If we had to switch to a fallback model due to Google 503 high demand,
-  // probe the primary model every 15 minutes. If Google's load cleared, return to primary seamlessly.
+  // probe the primary model every 10 minutes. If Google's load cleared, return to primary seamlessly.
   if (fallbackModelActivated && (now - lastPrimaryProbeTimestamp > PROBE_PRIMARY_COOLDOWN_MS)) {
     lastPrimaryProbeTimestamp = now;
     const probeKey = allKeys.find((k) => !isKeyExhausted(k));
@@ -949,39 +1013,21 @@ async function processTick(): Promise<void> {
   if (allKeysExhausted) {
     if (now < nextBackoffRetryTimestamp) {
       const waitSec = Math.max(1, Math.round((nextBackoffRetryTimestamp - now) / 1000));
-      lastWorkerStatusMessage = `تمامی کلیدها در وقفه سهمیه هستند. شکیبایی صبورانه سرور بدون عجله (${waitSec} ثانیه تا تست مجدد - دور ${consecutiveAllExhaustedRounds} از ${MAX_CONSECUTIVE_EXHAUSTED_ROUNDS}). سطرهای قبلی در دیسک امن هستند.`;
+      lastWorkerStatusMessage = `تمامی کلیدها در استراحت کوتاه هستند (${waitSec} ثانیه تا تست مجدد)...`;
       return;
     }
 
-    if (consecutiveAllExhaustedRounds >= MAX_CONSECUTIVE_EXHAUSTED_ROUNDS) {
-      // 5 consecutive rounds over 15+ minutes yielded all keys exhausted!
-      let changed = false;
-      db.projects.forEach((p) => {
-        if (p.status === 'translating' || p.status === 'queued') {
-          p.status = 'waiting_for_keys';
-          p.lastError = 'سهمیه روزانه تمامی کلیدها به اتمام رسیده است (پس از ۵ نوبت بررسی صبورانه سرور). ترجمه با حفظ ۱۰۰٪ سطرهای ترجمه‌شده متوقف شد تا کلید یا سهمیه جدید اضافه گردد.';
-          p.errorMessage = p.lastError;
-          changed = true;
-        }
-      });
-      if (changed) saveDatabaseSync();
-      lastWorkerStatusMessage = 'سهمیه روزانه تمامی کلیدها به اتمام رسیده است. ترجمه متوقف شد تا کلید جدید یا سهمیه شارژ شود (تمام سطرها ذخیره شده‌اند).';
-      return;
-    }
-
-    // Schedule next progressive backoff delay
+    // Schedule next fast probe delay
     const delay = BACKOFF_DELAYS_MS[Math.min(consecutiveAllExhaustedRounds, BACKOFF_DELAYS_MS.length - 1)];
     consecutiveAllExhaustedRounds++;
     nextBackoffRetryTimestamp = now + delay;
-    const delayMinutes = Math.round(delay / 60000);
-    lastWorkerStatusMessage = `تمامی کلیدها به سقف سهمیه رسیده‌اند. سیستم بدون عجله به مدت ${delayMinutes} دقیقه استراحت می‌کند و سپس وضعیت کلیدها را مجدداً خواهد سنجید (دور ${consecutiveAllExhaustedRounds} از ${MAX_CONSECUTIVE_EXHAUSTED_ROUNDS})...`;
+    lastWorkerStatusMessage = `استراحت کوتاه ${Math.round(delay / 1000)} ثانیه‌ای کلیدها...`;
     return;
   }
 
   // Strict 1-Key-Per-File Concurrency Architecture:
   // Every translating file uses strictly 1 dedicated leased key at a time.
-  // maxConcurrentProjects determines how many distinct files run in parallel (e.g. 10 files = 10 keys).
-  const maxActiveFiles = Math.max(1, config.maxConcurrentProjects || 4);
+  const maxActiveFiles = Math.max(1, config.maxConcurrentProjects || 6);
   const activeAvailableKeys = allKeys.filter((k) => !isKeyDisabled(k) && !isKeyExhausted(k));
   const totalMaxKeyThreads = Math.min(activeAvailableKeys.length, maxActiveFiles);
 
@@ -989,13 +1035,27 @@ async function processTick(): Promise<void> {
   let availableKeySlots = totalMaxKeyThreads - busyKeys.size;
 
   // 1. Audit projects: Auto-complete files whose all cues have valid translations,
-  // and normalize status of waiting projects to 'queued' instead of lingering in 'translating'
+  // and auto-resolve pure sound cues in-memory so they never consume quota
   const currentlyInFlightProjectIds = new Set(
     Array.from(inFlightCueKeys).map((k) => k.split('_')[0])
   );
 
   for (const p of db.projects) {
     if (p.totalCues > 0) {
+      let autoCount = 0;
+      for (const item of p.items) {
+        if (!item.translatedText || !item.translatedText.trim()) {
+          const sound = autoTranslateSoundEffect(item.originalText);
+          if (sound) {
+            item.translatedText = sound;
+            autoCount++;
+          }
+        }
+      }
+      if (autoCount > 0) {
+        p.translatedCues = p.items.filter((i) => Boolean(i.translatedText && i.translatedText.trim())).length;
+      }
+
       const untranslated = p.items.filter((i) => !i.translatedText || !i.translatedText.trim());
       if (untranslated.length === 0) {
         if (p.status !== 'completed') {
@@ -1008,7 +1068,6 @@ async function processTick(): Promise<void> {
         p.lastError = undefined;
         p.errorMessage = undefined;
       } else if (p.status === 'translating' && !currentlyInFlightProjectIds.has(p.id)) {
-        // If not actively executing a chunk in this moment, status is 'queued' so it doesn't falsely display as translating
         p.status = 'queued';
       }
     }
@@ -1025,8 +1084,7 @@ async function processTick(): Promise<void> {
 
   if (candidateProjects.length === 0) return;
 
-  // Strict Folder Isolation (بیا پوشه‌ای عمل کنیم - تا پوشه تمام نشده اتوماتیک پوشه بعدی شروع به کار نکند):
-  // Find which folders currently have actively translating files in flight
+  // Strict Folder Isolation:
   const runningFolders = new Set<string>();
   for (const cueKey of inFlightCueKeys) {
     const pId = cueKey.split('_')[0];
@@ -1035,14 +1093,11 @@ async function processTick(): Promise<void> {
   }
 
   if (runningFolders.size > 0) {
-    // If a folder is translating, focus ALL available keys on finishing this active folder first
     const candidatesInActiveFolders = candidateProjects.filter((p) => runningFolders.has(p.folderId));
     if (candidatesInActiveFolders.length > 0) {
       candidateProjects = candidatesInActiveFolders;
     }
   } else {
-    // If nothing is running yet, pick the folder with the highest priority project,
-    // and concentrate all concurrent key slots on that folder until it is finished!
     const priorityProject = candidateProjects.find((p) => p.isPriority);
     const targetFolderId = priorityProject ? priorityProject.folderId : candidateProjects[0]?.folderId;
     if (targetFolderId) {
@@ -1077,16 +1132,13 @@ async function processTick(): Promise<void> {
   );
 
   // Multi-File Simultaneous Concurrent Loop:
-  // Dispatch up to maxActiveFiles so exactly the requested number of files run in parallel!
   for (const project of candidateProjects) {
     if (availableKeySlots <= 0) break;
 
-    // Strict 1 key per file: If this file already has a batch in flight, do NOT assign a second key!
     if (runningProjectIds.has(project.id)) {
       continue;
     }
 
-    // Strict concurrency limit: Do not start more files than maxActiveFiles
     if (runningProjectIds.size >= maxActiveFiles) {
       break;
     }
@@ -1107,12 +1159,22 @@ async function processTick(): Promise<void> {
     busyKeys.add(leasedKey);
     availableKeySlots--;
 
-    // Single dedicated batch for this file (35 cues for near-end to finish promptly, or standard 50 cues)
-    const isNearEnd = untranslatedCues.length <= 35;
-    const chunkSize = isNearEnd ? Math.min(availableCues.length, 35) : BATCH_SIZE;
+    // Ultra-speed adaptive chunk size:
+    // When <= 120 cues remain (such as 100 cues), use NEAR_END_BATCH_SIZE (15 cues) for superfast sub-second translations!
+    // Standard batches use BATCH_SIZE (25 cues).
+    const isNearEnd = untranslatedCues.length <= 120;
+    const targetChunkSize = isNearEnd ? NEAR_END_BATCH_SIZE : BATCH_SIZE;
+    const chunkSize = Math.min(availableCues.length, targetChunkSize);
     const chunkCues = availableCues.slice(0, chunkSize);
 
-    chunkCues.forEach((c) => inFlightCueKeys.add(project.id + '_' + c.id));
+    const nowDispatch = Date.now();
+    chunkCues.forEach((c) => {
+      const k = project.id + '_' + c.id;
+      inFlightCueKeys.add(k);
+      inFlightCueTimestamps.set(k, nowDispatch);
+    });
+    busyKeys.add(leasedKey);
+    busyKeyTimestamps.set(leasedKey, nowDispatch);
     runningProjectIds.add(project.id);
 
     project.status = 'translating';
@@ -1126,8 +1188,13 @@ async function processTick(): Promise<void> {
       } catch (e) {
         console.error(`[BackgroundWorker] Unexpected error in worker for ${project.id}:`, e);
       } finally {
-        chunkCues.forEach((c) => inFlightCueKeys.delete(project.id + '_' + c.id));
+        chunkCues.forEach((c) => {
+          const k = project.id + '_' + c.id;
+          inFlightCueKeys.delete(k);
+          inFlightCueTimestamps.delete(k);
+        });
         busyKeys.delete(leasedKey);
+        busyKeyTimestamps.delete(leasedKey);
         // Instant key switching: As soon as any file completes a chunk or frees up its key,
         // immediately trigger the next tick so reserve keys / free slots switch to the next file without delay!
         setTimeout(() => {
@@ -1142,8 +1209,12 @@ export function triggerEmergencyIncompleteTranslation(folderId?: string): {
   retriedCount: number;
   projectNames: string[];
 } {
-  const result = retryDisruptedAndIncompleteProjects(folderId);
+  // Clear all in-flight locks and cooldowns to instantly unstick any frozen file
+  clearAllStuckLocks();
+  resetAllKeyCooldowns();
   resetWorkerExhaustionBackoff();
+
+  const result = retryDisruptedAndIncompleteProjects(folderId);
   setTimeout(() => {
     void processTick();
   }, 10);

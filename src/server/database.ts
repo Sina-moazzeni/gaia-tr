@@ -698,8 +698,8 @@ export function rotateActiveKeyIndex(): number {
 // ─── Key Exhaustion & Cooldown Tracking ──────────────────────────────────────
 
 export const exhaustedKeysMap = new Map<string, { timestamp: number; reason: string }>();
-// 35 seconds cooldown (Gemini rolling window resets quickly)
-const KEY_EXHAUSTION_COOLDOWN_MS = 35 * 1000;
+// Fast 15 seconds cooldown (Gemini rolling window resets quickly within 10-15s)
+const KEY_EXHAUSTION_COOLDOWN_MS = 15 * 1000;
 
 export function markKeyAsExhausted(key: string, reason: string = 'Quota exhausted (429)'): void {
   exhaustedKeysMap.set(key, { timestamp: Date.now(), reason });
@@ -1023,7 +1023,7 @@ export function retryDisruptedAndIncompleteProjects(folderId?: string): {
       return;
     }
 
-    if (hasIssues || (untranslatedCount > 0 && p.status !== 'translating')) {
+    if (untranslatedCount > 0) {
       p.status = 'queued';
       p.hasDisruption = false;
       p.isPriority = true; // Mark as emergency priority
