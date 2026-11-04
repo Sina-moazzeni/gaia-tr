@@ -95,7 +95,7 @@ function ensureDataDir() {
 const DEFAULT_SERVER_CONFIG: ServerConfig = {
   allowedOrigin: process.env.ALLOWED_ORIGIN?.trim() || '*',
   geminiBaseUrl: process.env.GEMINI_BASE_URL?.trim() || 'https://generativelanguage.googleapis.com',
-  maxConcurrentProjects: Number(process.env.MAX_CONCURRENT_PROJECTS) || 4,
+  maxConcurrentProjects: Number(process.env.MAX_CONCURRENT_PROJECTS) || 6,
   maxTotalParallelKeys: Number(process.env.MAX_PARALLEL_KEYS) || 19,
   maxKeysPerProject: 1, // Strictly 1 dedicated key per file
 };
