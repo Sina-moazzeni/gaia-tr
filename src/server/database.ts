@@ -90,8 +90,8 @@ function ensureDataDir() {
 const DEFAULT_SERVER_CONFIG: ServerConfig = {
   allowedOrigin: process.env.ALLOWED_ORIGIN?.trim() || '*',
   geminiBaseUrl: process.env.GEMINI_BASE_URL?.trim() || 'https://generativelanguage.googleapis.com',
-  maxConcurrentProjects: Number(process.env.MAX_CONCURRENT_PROJECTS) || 4,
-  maxTotalParallelKeys: Number(process.env.MAX_PARALLEL_KEYS) || 8,
+  maxConcurrentProjects: Number(process.env.MAX_CONCURRENT_PROJECTS) || 8,
+  maxTotalParallelKeys: Number(process.env.MAX_PARALLEL_KEYS) || 19,
 };
 
 function loadDatabaseFromDisk(): SubtitlesDatabase {
@@ -179,7 +179,7 @@ export function saveDatabaseSync(): void {
   if (!inMemoryDb) return;
   ensureDataDir();
   try {
-    const serialized = JSON.stringify(inMemoryDb, null, 2);
+    const serialized = JSON.stringify(inMemoryDb);
     fs.writeFileSync(DB_TMP_FILE, serialized, 'utf-8');
     fs.renameSync(DB_TMP_FILE, DB_FILE);
   } catch (err) {
@@ -458,12 +458,18 @@ export function deleteProject(id: string): boolean {
 
 export function getServerConfig(): ServerConfig {
   const db = getDatabase();
+  const allKeys = getServerKeys();
   if (!db.serverConfig) {
     db.serverConfig = { ...DEFAULT_SERVER_CONFIG };
     saveDatabaseSync();
   }
-  if (!db.serverConfig.maxTotalParallelKeys) {
-    db.serverConfig.maxTotalParallelKeys = 8;
+  // DYNAMICALLY ensure maxTotalParallelKeys utilizes all available keys (at least up to 19/32)
+  const idealParallelKeys = Math.max(16, allKeys.length);
+  if (!db.serverConfig.maxTotalParallelKeys || db.serverConfig.maxTotalParallelKeys < idealParallelKeys) {
+    db.serverConfig.maxTotalParallelKeys = Math.min(32, idealParallelKeys);
+  }
+  if (!db.serverConfig.maxConcurrentProjects || db.serverConfig.maxConcurrentProjects < 8) {
+    db.serverConfig.maxConcurrentProjects = 8;
   }
   return db.serverConfig;
 }
@@ -629,8 +635,8 @@ export function rotateActiveKeyIndex(): number {
 // ─── Key Exhaustion & Cooldown Tracking ──────────────────────────────────────
 
 export const exhaustedKeysMap = new Map<string, { timestamp: number; reason: string }>();
-// 60 seconds RPM cooldown (Gemini 15 RPM limit resets every minute, NOT 15 minutes!)
-const KEY_EXHAUSTION_COOLDOWN_MS = 60 * 1000;
+// 40 seconds cooldown (Gemini free tier rolling quota window resets every minute)
+const KEY_EXHAUSTION_COOLDOWN_MS = 40 * 1000;
 
 export function markKeyAsExhausted(key: string, reason: string = 'Quota exhausted (429)'): void {
   exhaustedKeysMap.set(key, { timestamp: Date.now(), reason });
@@ -710,13 +716,16 @@ export function leaseAvailableKey(excludeKeys: string[] = []): { key: string; in
   if (allKeys.length === 0) return null;
 
   const excludedSet = new Set(excludeKeys);
-  const startIdx = getActiveKeyIndex() % allKeys.length;
+  const db = getDatabase();
+  const startIdx = (db.activeKeyIndex || 0) % allKeys.length;
 
   // First pass: find key that is NOT exhausted and NOT in excludeKeys
   for (let i = 0; i < allKeys.length; i++) {
     const candidateIdx = (startIdx + i) % allKeys.length;
     const candidateKey = allKeys[candidateIdx];
     if (!isKeyExhausted(candidateKey) && !excludedSet.has(candidateKey)) {
+      // Advance activeKeyIndex to candidateIdx + 1 for fair round-robin across all keys!
+      db.activeKeyIndex = (candidateIdx + 1) % allKeys.length;
       return { key: candidateKey, index: candidateIdx, total: allKeys.length };
     }
   }
@@ -726,6 +735,7 @@ export function leaseAvailableKey(excludeKeys: string[] = []): { key: string; in
     const candidateIdx = (startIdx + i) % allKeys.length;
     const candidateKey = allKeys[candidateIdx];
     if (!isKeyExhausted(candidateKey)) {
+      db.activeKeyIndex = (candidateIdx + 1) % allKeys.length;
       return { key: candidateKey, index: candidateIdx, total: allKeys.length };
     }
   }
@@ -733,10 +743,11 @@ export function leaseAvailableKey(excludeKeys: string[] = []): { key: string; in
   // If ALL keys are exhausted, check cooldowns
   const anyNonExhausted = allKeys.some((k) => !isKeyExhausted(k));
   if (!anyNonExhausted) {
-    console.warn('[KeyPool] All keys in pool are currently exhausted.');
     return null;
   }
 
+  const nextIdx = (startIdx + 1) % allKeys.length;
+  db.activeKeyIndex = nextIdx;
   return { key: allKeys[startIdx], index: startIdx, total: allKeys.length };
 }
 

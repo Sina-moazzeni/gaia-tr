@@ -1201,7 +1201,7 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
       const data = await res.json();
       setTestResult(data);
       if (data.success) {
-        onShowToast(`تست کلید موفق بود: تاخیر ${data.latencyMs}ms با مدل Gemini 3.5 Flash Lite`, 'success');
+        onShowToast(`تست کلید موفق بود: تاخیر ${data.latencyMs}ms با مدل فوق‌سریع Gemini 3.1 Flash Lite`, 'success');
       } else {
         onShowToast(`نتیجه تست کلید: ${data.message || 'خطا'}`, 'error');
       }
@@ -1377,7 +1377,7 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
                   موتور دیتابیس و ترجمه مستقل در پس‌زمینه سرور
                 </h2>
                 <span className="text-[11px] font-mono font-bold px-2.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/40">
-                  Gemini 3.5 Flash Lite
+                  Gemini 3.1 Flash Lite (موتور فوق‌سریع)
                 </span>
                 <span className="text-[11px] font-mono px-2 py-0.5 rounded-full bg-slate-800 text-slate-300 border border-slate-700 flex items-center gap-1">
                   <Database className="w-3 h-3 text-cyan-400" />
