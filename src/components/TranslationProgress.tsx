@@ -119,8 +119,8 @@ export const TranslationProgress: React.FC<TranslationProgressProps> = ({
         return <Radio className="w-5 h-5 text-rose-400 animate-pulse" />;
       case 'gemini-3.1-pro-preview':
       case 'gemini-3.1-pro':
-      case 'gemini-2.5-pro':
         return <BrainCircuit className="w-5 h-5 text-purple-400" />;
+      case 'gemini-flash-latest':
       case 'gemini-3.8-flash':
         return <Sparkles className="w-5 h-5 text-emerald-400" />;
       case 'gemini-3.7-flash':

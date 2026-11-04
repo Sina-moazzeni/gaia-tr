@@ -113,7 +113,7 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({
   uiLang,
   onOpenBilingualModal,
   isBilingualActive = false,
-  selectedModel = 'gemini-3.6-flash',
+  selectedModel = 'gemini-3.1-flash-lite',
   setSelectedModel,
   gameColumns,
   gameMapping,
@@ -192,8 +192,8 @@ export const ConfigPanel: React.FC<ConfigPanelProps> = ({
         return <Radio className="w-4 h-4 text-rose-500 animate-pulse" />;
       case 'gemini-3.1-pro-preview':
       case 'gemini-3.1-pro':
-      case 'gemini-2.5-pro':
         return <BrainCircuit className="w-4 h-4 text-purple-500" />;
+      case 'gemini-flash-latest':
       case 'gemini-3.8-flash':
         return <Sparkles className="w-4 h-4 text-emerald-500" />;
       case 'gemini-3.7-flash':

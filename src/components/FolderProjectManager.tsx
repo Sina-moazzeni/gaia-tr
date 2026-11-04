@@ -128,6 +128,9 @@ export interface WorkerStatusData {
   totalKeys: number;
   activeKeys: number;
   exhaustedKeys: number;
+  dailyExhaustedKeys?: number;
+  minuteExhaustedKeys?: number;
+  stuckReason?: string;
   lastMessage: string;
 }
 
@@ -144,6 +147,10 @@ export interface KeyDetailItem {
   rawKey: string;
   maskedKey: string;
   isExhausted: boolean;
+  isDailyExhausted?: boolean;
+  isMinuteExhausted?: boolean;
+  exhaustionType?: 'minute' | 'daily';
+  exhaustionReason?: string;
   cooldownRemainingSec: number;
   isDisabled?: boolean;
   disabledReason?: string;
@@ -1194,6 +1201,29 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
     }
   };
 
+  // Safe Clear Cache: Clears stuck locks, key exhaustion cooldowns, and re-queues incomplete files WITHOUT deleting subtitles
+  const [isClearingCache, setIsClearingCache] = useState(false);
+  const handleClearCache = async () => {
+    setIsClearingCache(true);
+    try {
+      const res = await fetch('/api/worker/clear-cache', { method: 'POST' });
+      const data = await res.json();
+      if (data.success) {
+        onShowToast(data.message || 'کش، قفل‌ها و وقفه‌های کلیدها پاکسازی شدند (همه زیرنویس‌ها محفوظ ماندند).', 'success');
+        await fetchFolders();
+        if (selectedFolderId) await fetchProjects(selectedFolderId);
+        await fetchAllProjects();
+        await fetchServerKeys();
+      } else {
+        onShowToast(data.error || 'خطا در پاکسازی کش سرور', 'error');
+      }
+    } catch {
+      onShowToast('خطا در ارتباط با سرور برای پاکسازی کش', 'error');
+    } finally {
+      setIsClearingCache(false);
+    }
+  };
+
   // Full Database Backup Download
   const handleDownloadBackup = () => {
     const link = document.createElement('a');
@@ -1527,6 +1557,21 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
             <span>⚡ تکمیل فوری سطرها (توربو)</span>
           </button>
 
+          <button
+            type="button"
+            onClick={handleClearCache}
+            disabled={isClearingCache}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold bg-rose-500/15 text-rose-300 hover:bg-rose-500/25 border border-rose-500/40 shadow-xs transition-all cursor-pointer"
+            title="پاکسازی کش سرور، قفل‌های موقت و استراحت کلیدها بدون حذف زیرنویس‌ها"
+          >
+            {isClearingCache ? (
+              <Loader2 className="w-3.5 h-3.5 animate-spin text-rose-400" />
+            ) : (
+              <RotateCcw className="w-3.5 h-3.5 text-rose-400" />
+            )}
+            <span>🧹 پاکسازی کش (حفظ زیرنویس)</span>
+          </button>
+
           <span className="hidden sm:inline-block w-px h-5 bg-slate-800 mx-0.5" />
 
           {/* Action Group 2: Database & Audit */}
@@ -1654,6 +1699,46 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
 
         return (
           <div className="w-full bg-slate-900/95 border border-indigo-500/35 rounded-2xl p-4 sm:p-5 flex flex-col gap-4 shadow-2xl text-xs backdrop-blur-md">
+            {/* Live Diagnostic Banner: علت عدم پیشرفت یا اتمام سهمیه روزانه */}
+            {workerStatus?.stuckReason && (
+              <div className="p-4 rounded-2xl bg-rose-500/10 dark:bg-rose-950/40 border border-rose-500/40 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 text-rose-900 dark:text-rose-200 animate-slide-up shadow-sm">
+                <div className="flex items-start gap-3">
+                  <AlertCircle className="w-5 h-5 text-rose-500 shrink-0 mt-0.5" />
+                  <div>
+                    <div className="text-xs font-bold uppercase tracking-wider text-rose-400 flex items-center gap-2">
+                      <span>⚠️ علت توقف پیشرفت ترجمه زیرنویس‌ها:</span>
+                      {workerStatus.dailyExhaustedKeys && workerStatus.dailyExhaustedKeys > 0 ? (
+                        <span className="px-2 py-0.5 rounded text-[10px] bg-rose-600 text-white font-sans font-bold">
+                          اتمام سهمیه روزانه ({workerStatus.dailyExhaustedKeys} کلید)
+                        </span>
+                      ) : null}
+                    </div>
+                    <p className="text-xs mt-1 leading-relaxed text-rose-200 font-medium">{workerStatus.stuckReason}</p>
+                  </div>
+                </div>
+                <div className="flex items-center gap-2 self-end sm:self-center shrink-0">
+                  <button
+                    type="button"
+                    onClick={() => setIsKeysModalOpen(true)}
+                    className="px-3.5 py-1.5 rounded-xl bg-rose-600 hover:bg-rose-500 text-white text-xs font-bold transition-all shadow-sm active:scale-95 flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <Key className="w-3.5 h-3.5" />
+                    <span>مدیریت کلیدها</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleClearCache}
+                    disabled={isClearingCache}
+                    className="px-3.5 py-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-xs font-bold transition-all active:scale-95 flex items-center gap-1.5 cursor-pointer"
+                    title="پاکسازی کش سرور، رفع قفل‌ها و امتحان مجدد بدون حذف زیرنویس‌ها"
+                  >
+                    <RotateCcw className={`w-3.5 h-3.5 ${isClearingCache ? 'animate-spin' : ''}`} />
+                    <span>پاکسازی کش و تست مجدد</span>
+                  </button>
+                </div>
+              </div>
+            )}
+
             {/* Top Bar: Concurrency Config & Single Primary CTA */}
             <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 pb-4 border-b border-slate-800">
               
@@ -3246,7 +3331,7 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
                             <AlertCircle className="w-4 h-4 text-rose-400 shrink-0 mt-0.5" />
                             <div className="flex flex-col gap-0.5">
                               <span className="font-bold text-rose-300">گزارش وضعیت اختلال:</span>
-                              <span>{proj.lastError.includes('429') ? 'محدودیت سهمیه موقت کلید جمینای (429 Quota Exhausted)' : proj.lastError}</span>
+                              <span className="leading-relaxed">{proj.lastError}</span>
                               <span className="text-emerald-400 font-semibold text-[10px] mt-0.5">
                                 ✓ تمام سطرهای ترجمه شده ({proj.translatedCues} سطر) در دیتابیس سرور کاملاً محفوظ است.
                               </span>
@@ -3818,11 +3903,11 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
                   <h3 className="text-sm sm:text-base font-bold text-white flex items-center gap-2">
                     <span>مدیریت استخر کلیدهای هوش مصنوعی و آمار مصرف توکن</span>
                     <span className="text-[11px] font-mono px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/40">
-                      Gemini 3.5 Flash Lite
+                      Gemini 3.1 Flash Lite
                     </span>
                   </h3>
                   <p className="text-xs text-slate-400 mt-0.5">
-                    نمایش وضعیت زنده، میزان توکن مصرفی هر کلید، چرخش خودکار و رفع وقفه سهمیه
+                    نمایش وضعیت زنده، تفکیک سهمیه روزانه (RPD) از وقفه دقیقه (RPM)، میزان توکن مصرفی و خروج هوشمند کلیدهای منقضی از چرخه
                   </p>
                 </div>
               </div>
@@ -3838,13 +3923,15 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
             {/* KPI Summary Cards */}
             {(() => {
               const totalKeys = keysDetails.length;
-              const activeKeys = keysDetails.filter((k) => !k.isExhausted).length;
-              const restingKeys = keysDetails.filter((k) => k.isExhausted).length;
+              const dailyKeys = keysDetails.filter((k) => k.isDailyExhausted).length;
+              const minuteKeys = keysDetails.filter((k) => k.isMinuteExhausted && !k.isDailyExhausted).length;
+              const disabledKeys = keysDetails.filter((k) => k.isDisabled).length;
+              const activeKeys = keysDetails.filter((k) => !k.isExhausted && !k.isDisabled).length;
               const totalTokensSum = keysDetails.reduce((acc, k) => acc + (k.totalTokens || 0), 0);
               const totalReqsSum = keysDetails.reduce((acc, k) => acc + (k.requestsCount || 0), 0);
 
               return (
-                <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
+                <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
                   <div className="bg-slate-950/80 border border-slate-800 rounded-2xl p-3 flex flex-col gap-1">
                     <span className="text-[11px] text-slate-400 font-semibold flex items-center gap-1.5">
                       <Key className="w-3.5 h-3.5 text-indigo-400" />
@@ -3853,32 +3940,41 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
                     <span className="text-xl font-bold font-mono text-white">{totalKeys}</span>
                   </div>
 
-                  <div className="bg-slate-950/80 border border-slate-800 rounded-2xl p-3 flex flex-col gap-1">
-                    <span className="text-[11px] text-slate-400 font-semibold flex items-center gap-1.5">
+                  <div className="bg-slate-950/80 border border-emerald-500/30 rounded-2xl p-3 flex flex-col gap-1">
+                    <span className="text-[11px] text-emerald-400 font-semibold flex items-center gap-1.5">
                       <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
-                      <span>کلیدهای آماده و فعال</span>
+                      <span>آماده و در چرخه</span>
                     </span>
                     <span className="text-xl font-bold font-mono text-emerald-400">{activeKeys}</span>
                   </div>
 
-                  <div className="bg-slate-950/80 border border-slate-800 rounded-2xl p-3 flex flex-col gap-1">
-                    <span className="text-[11px] text-slate-400 font-semibold flex items-center gap-1.5">
-                      <Clock className="w-3.5 h-3.5 text-rose-400" />
-                      <span>وقفه موقت (۱ دقیقه)</span>
+                  <div className="bg-slate-950/80 border border-amber-500/30 rounded-2xl p-3 flex flex-col gap-1">
+                    <span className="text-[11px] text-amber-400 font-semibold flex items-center gap-1.5">
+                      <Clock className="w-3.5 h-3.5 text-amber-400" />
+                      <span>استراحت موقت RPM</span>
                     </span>
-                    <span className="text-xl font-bold font-mono text-rose-400">{restingKeys}</span>
+                    <span className="text-xl font-bold font-mono text-amber-400">{minuteKeys}</span>
                   </div>
 
-                  <div className="bg-slate-950/80 border border-slate-800 rounded-2xl p-3 flex flex-col gap-1">
+                  <div className="bg-slate-950/80 border border-rose-500/30 rounded-2xl p-3 flex flex-col gap-1">
+                    <span className="text-[11px] text-rose-400 font-semibold flex items-center gap-1.5">
+                      <AlertCircle className="w-3.5 h-3.5 text-rose-400" />
+                      <span>اتمام سهمیه روزانه</span>
+                    </span>
+                    <span className="text-xl font-bold font-mono text-rose-400">{dailyKeys}</span>
+                    <span className="text-[9px] text-rose-400/80">خارج از چرخه</span>
+                  </div>
+
+                  <div className="bg-slate-950/80 border border-slate-800 rounded-2xl p-3 flex flex-col gap-1 col-span-2 sm:col-span-1">
                     <span className="text-[11px] text-slate-400 font-semibold flex items-center gap-1.5">
                       <Sparkles className="w-3.5 h-3.5 text-amber-400" />
-                      <span>مجموع توکن مصرفی</span>
+                      <span>توکن‌های مصرفی</span>
                     </span>
-                    <span className="text-lg font-bold font-mono text-amber-300">
+                    <span className="text-base font-bold font-mono text-amber-300">
                       {totalTokensSum.toLocaleString()}
                     </span>
-                    <span className="text-[10px] text-slate-500 font-mono">
-                      در {totalReqsSum} درخواست API
+                    <span className="text-[9px] text-slate-500 font-mono">
+                      {totalReqsSum} درخواست
                     </span>
                   </div>
                 </div>
@@ -3890,17 +3986,28 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
               <div className="flex flex-col gap-1 text-xs text-slate-300 leading-relaxed">
                 <div className="flex items-center gap-2 font-bold text-amber-300">
                   <Sparkles className="w-4 h-4 text-amber-400 shrink-0" />
-                  <span>بهینه‌سازی حداکثری مصرف توکن و زمان استراحت کلیدها:</span>
+                  <span>محافظت هوشمند استخر و جداسازی سهمیه روزانه:</span>
                 </div>
                 <p className="text-[11px] text-slate-300">
-                  • دسته‌ها به <span className="text-emerald-300 font-bold font-mono">۵۰ سطر</span> در هر درخواست افزایش یافت تا پرامپت تکراری حذف و <span className="text-emerald-300 font-bold">بیش از ۶۰٪ در مصرف توکن صرفه‌جویی شود</span>.
+                  • کلیدهایی که سهمیه روزانه گوگل (Requests Per Day) را تمام کنند، <span className="text-rose-400 font-bold">بلافاصله از چرخه چرخش خارج می‌شوند</span> تا مانع پیشرفت و توقف ترجمه نشوند.
                 </p>
                 <p className="text-[11px] text-slate-300">
-                  • زمان خنک‌سازی سهمیه به جای ۱۵ دقیقه، تنها روی <span className="text-amber-300 font-bold font-mono">۶۰ ثانیه</span> تنظیم شد تا در چرخش ۱۱ کلید، کلیدها بدون توقف آماده استفاده باشند.
+                  • تمام ترجمه‌ها با مدل پرسرعت رسمی <span className="text-emerald-300 font-bold font-mono">Gemini 3.1 Flash Lite</span> انجام می‌شوند و هیچ مدل منسوخی استفاده نمی‌شود.
                 </p>
               </div>
 
-              <div className="flex items-center gap-2 shrink-0 self-end sm:self-center">
+              <div className="flex items-center gap-2 shrink-0 self-end sm:self-center flex-wrap">
+                <button
+                  type="button"
+                  onClick={handleClearCache}
+                  disabled={isClearingCache}
+                  className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold text-slate-200 bg-slate-800 hover:bg-slate-700 border border-slate-700 shadow-sm transition-all cursor-pointer"
+                  title="پاکسازی کامل کش، قفل‌های مسدود و بازگردانی صف بدون حذف زیرنویس‌ها"
+                >
+                  <RotateCcw className={`w-3.5 h-3.5 ${isClearingCache ? 'animate-spin' : ''}`} />
+                  <span>پاکسازی کش (حفظ زیرنویس)</span>
+                </button>
+
                 <button
                   type="button"
                   onClick={handleResetAllCooldowns}
@@ -3908,7 +4015,7 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
                   title="خارج کردن تمام کلیدها از حالت وقفه و فعال‌سازی فوری"
                 >
                   <RotateCcw className="w-3.5 h-3.5" />
-                  <span>رفع وقفه فوری تمام کلیدها</span>
+                  <span>رفع وقفه کلیدها</span>
                 </button>
               </div>
             </div>
@@ -4017,15 +4124,20 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
                                     <AlertCircle className="w-3 h-3 text-rose-400" />
                                     <span>غیرفعال (۴۰۱ - حذف‌شده یا فاقد دسترسی در گوگل)</span>
                                   </span>
+                                ) : k.isDailyExhausted ? (
+                                  <span className="flex items-center gap-1 text-rose-300 font-bold bg-rose-500/20 px-2 py-0.5 rounded-md border border-rose-500/40">
+                                    <AlertCircle className="w-3 h-3 text-rose-400" />
+                                    <span>🔴 اتمام سهمیه روزانه (Daily Quota) — خارج از چرخه تا فردا</span>
+                                  </span>
                                 ) : k.isExhausted ? (
                                   <span className="flex items-center gap-1 text-amber-400 font-semibold bg-amber-500/10 px-2 py-0.5 rounded-md border border-amber-500/20">
                                     <Clock className="w-3 h-3" />
-                                    <span>وقفه سهمیه ({k.cooldownRemainingSec}s مانده)</span>
+                                    <span>🟡 استراحت موقت دقیقه ({k.cooldownRemainingSec}s مانده)</span>
                                   </span>
                                 ) : (
                                   <span className="flex items-center gap-1 text-emerald-400 font-semibold">
                                     <CheckCircle2 className="w-3 h-3" />
-                                    <span>آماده و فعال در صف چرخش</span>
+                                    <span>🟢 آماده و فعال در چرخه (Gemini 3.1 Flash Lite)</span>
                                   </span>
                                 )}
 
