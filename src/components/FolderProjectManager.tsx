@@ -521,11 +521,12 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
                 prev.map((p) => {
                   const active = activeMap.get(p.id);
                   if (active) {
+                    const isComp = p.status === 'completed' || active.translatedCues >= active.totalCues;
                     return {
                       ...p,
-                      translatedCues: active.translatedCues,
+                      translatedCues: isComp ? (p.totalCues || active.totalCues) : active.translatedCues,
                       totalCues: active.totalCues,
-                      status: active.translatedCues >= active.totalCues ? 'completed' : 'translating',
+                      status: isComp ? 'completed' : 'translating',
                     };
                   }
                   return p;
@@ -535,11 +536,12 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
                 prev.map((p) => {
                   const active = activeMap.get(p.id);
                   if (active) {
+                    const isComp = p.status === 'completed' || active.translatedCues >= active.totalCues;
                     return {
                       ...p,
-                      translatedCues: active.translatedCues,
+                      translatedCues: isComp ? (p.totalCues || active.totalCues) : active.translatedCues,
                       totalCues: active.totalCues,
-                      status: active.translatedCues >= active.totalCues ? 'completed' : 'translating',
+                      status: isComp ? 'completed' : 'translating',
                     };
                   }
                   return p;

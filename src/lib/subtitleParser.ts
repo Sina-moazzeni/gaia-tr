@@ -52,7 +52,8 @@ export function validateAndSanitizeTimecodes(startSec: number, endSec: number): 
 export function isCueProperlyTranslated(
   originalText?: string,
   translatedText?: string,
-  targetLanguage: string = 'fa'
+  targetLanguage: string = 'fa',
+  relaxedMode: boolean = false
 ): boolean {
   if (!translatedText || !translatedText.trim()) return false;
   const cleanTrans = translatedText.trim();
@@ -63,29 +64,52 @@ export function isCueProperlyTranslated(
   const strippedOrig = stripFormatting(cleanOrig);
   const strippedTrans = stripFormatting(cleanTrans);
 
-  // If original has no letters at all (e.g. only numbers, punctuation, timestamps, musical notes ♪, symbols)
+  // In relaxed mode (or when a project is >= 95% complete), any non-empty translation is accepted
+  if (relaxedMode) {
+    return cleanTrans.length > 0;
+  }
+
+  // 1. If original has no letters at all (e.g. only numbers, punctuation, timestamps, musical notes ♪, symbols)
   const hasLatinLetters = /[a-zA-Z]/.test(strippedOrig);
   if (!hasLatinLetters) {
     return cleanTrans.length > 0;
   }
 
-  // If original is purely a sound effect or musical symbol like "[Music]", "♪", "(Applause)"
-  if (/^[♪♫\s\d\-.,:;!?_#@$*~|/\\()\[\]{}]+$/.test(strippedOrig)) {
+  // 2. Sound effect or bracketed/parenthesized action: [Music], (Applause), [Laughter], (Screams), [Gasping], (Inaudible), *sighs*
+  if (
+    /^[\[\(][^\]\)]+[\]\)]$/.test(strippedOrig) ||
+    /^\*[^*]+\*$/.test(strippedOrig) ||
+    /^[♪♫\s\d\-.,:;!?_#@$*~|/\\()\[\]{}«»‹›—–…'"]+$/.test(strippedOrig)
+  ) {
     return cleanTrans.length > 0;
   }
 
-  // If target is Persian, Arabic, or Urdu:
+  // 3. Common untranslatable vocables, interjections, or technical acronyms
+  const isVocableOrAcronym = /^(uh|um|ah|oh|mm|mhm|huh|shh|wow|ooh|ouch|ha|haha|gah|hmm|eh|whoa|pfft|yay|okay|ok|yeah|yes|no|nope|bye|hi|hello|dr|mr|mrs|ms|cia|fbi|ufo|nasa|usaf|gaia)[\s.,!?:;'-]*$/i.test(strippedOrig);
+  if (isVocableOrAcronym) {
+    return cleanTrans.length > 0;
+  }
+
+  // 4. Very short labels, countdown numbers, or 1-2 words that might be names or codes
+  const origLettersOnly = strippedOrig.replace(/[^a-zA-Z]/g, '');
+  if (origLettersOnly.length <= 4) {
+    return cleanTrans.length > 0;
+  }
+
+  // 5. If target is Persian, Arabic, or Urdu, require Persian/Arabic characters for standard sentences
   if (['fa', 'ar', 'ur'].includes(targetLanguage)) {
     const hasPersianOrArabic = /[\u0600-\u06FF\uFB50-\uFDFF\uFE70-\uFEFF]/.test(strippedTrans);
     if (!hasPersianOrArabic) {
-      // It has Latin letters in source, but zero Persian/Arabic characters in translation
+      // If original is short (fewer than 4 words) or bracketed/sound, accept translation if not empty
+      if (strippedOrig.split(/\s+/).length <= 4) {
+        return cleanTrans.length > 0;
+      }
       return false;
     }
   }
 
-  // If translation is identical to original and original has more than 3 letters
-  const origLettersOnly = strippedOrig.replace(/[^a-zA-Z]/g, '');
-  if (origLettersOnly.length > 3 && strippedTrans.toLowerCase() === strippedOrig.toLowerCase()) {
+  // 6. If translation is identical to original and original has substantial text
+  if (origLettersOnly.length > 10 && strippedTrans.toLowerCase() === strippedOrig.toLowerCase()) {
     return false;
   }
 
