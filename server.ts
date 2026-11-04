@@ -2108,8 +2108,8 @@ async function testSingleGeminiKey(keyStr: string): Promise<{
   }
 
   // Ultra-lightweight live probe across known fast & stable models
-  // 'gemini-3.6-flash' is fast and resilient against 503 load spikes
-  const modelsToTest = ['gemini-3.6-flash', 'gemini-3.8-flash', 'gemini-3.1-flash-lite', 'gemini-3.5-flash'];
+  // 'gemini-3.1-flash-lite' is the official fast primary translation model
+  const modelsToTest = ['gemini-3.1-flash-lite', 'gemini-flash-latest', 'gemini-3.8-flash'];
   let lastErr: any = null;
 
   for (const modelName of modelsToTest) {
