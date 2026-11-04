@@ -26,6 +26,8 @@ export interface ServerSubtitleProject {
   customPrompt?: string;
   status: ProjectStatus;
   hasDisruption?: boolean;
+  isPriority?: boolean;
+  priorityLevel?: number;
   maxKeys?: number;
   totalCues: number;
   translatedCues: number;
@@ -1004,21 +1006,28 @@ export function retryDisruptedAndIncompleteProjects(folderId?: string): {
 } {
   const db = getDatabase();
   const retried: string[] = [];
+  const priorityTime = Date.now();
+
+  // Clear any temporary key exhaustions so all active keys can be leased immediately
+  resetAllKeyCooldowns();
 
   db.projects.forEach((p) => {
     if (folderId && p.folderId !== folderId) return;
-    const untranslatedCount = p.items.filter((i) => !i.translatedText || !i.translatedText.trim()).length;
-    const hasIssues = p.status === 'has_incomplete' || p.status === 'error' || Boolean(p.hasDisruption) || Boolean(p.lastError) || untranslatedCount > 0;
+    const untranslatedCount = (p.items || []).filter((i) => !i.translatedText || !i.translatedText.trim()).length;
+    const hasIssues = p.status === 'has_incomplete' || p.status === 'error' || p.status === 'waiting_for_keys' || p.status === 'paused' || Boolean(p.hasDisruption) || Boolean(p.lastError) || (untranslatedCount > 0 && p.status !== 'completed');
 
     // If all lines are actually translated, mark completed and skip
     if (untranslatedCount === 0 && p.totalCues > 0) {
       p.status = 'completed';
+      p.isPriority = false;
       return;
     }
 
-    if (hasIssues) {
+    if (hasIssues || (untranslatedCount > 0 && p.status !== 'translating')) {
       p.status = 'queued';
       p.hasDisruption = false;
+      p.isPriority = true; // Mark as emergency priority
+      p.priorityLevel = priorityTime;
       p.lastError = undefined;
       p.errorMessage = undefined;
       p.failedCueIds = [];
@@ -1034,6 +1043,26 @@ export function retryDisruptedAndIncompleteProjects(folderId?: string): {
     retriedCount: retried.length,
     projectNames: retried,
   };
+}
+
+export function setProjectPriority(projectId: string, isPriority: boolean): ServerSubtitleProject | null {
+  const db = getDatabase();
+  const project = db.projects.find((p) => p.id === projectId);
+  if (!project) return null;
+
+  project.isPriority = isPriority;
+  if (isPriority) {
+    project.priorityLevel = Date.now();
+    if (project.status === 'paused' || project.status === 'idle' || project.status === 'error' || project.status === 'waiting_for_keys' || project.status === 'has_incomplete') {
+      project.status = 'queued';
+    }
+    project.hasDisruption = false;
+    project.lastError = undefined;
+    project.errorMessage = undefined;
+  }
+  project.updatedAt = new Date().toISOString();
+  saveDatabaseSync();
+  return project;
 }
 
 export function isIncompleteProject(p: ServerSubtitleProject): boolean {

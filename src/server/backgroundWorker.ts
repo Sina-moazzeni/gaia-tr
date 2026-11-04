@@ -14,12 +14,15 @@ import {
   markKeyAsDisabled,
   isKeyDisabled,
   resetKeyCooldown,
+  resetAllKeyCooldowns,
   getExhaustedKeysList,
   saveDatabaseSync, 
   scheduleSaveDatabase,
   getServerConfig,
   resetProjectTranslation,
   recordKeyUsage,
+  retryDisruptedAndIncompleteProjects,
+  setProjectPriority,
   ServerSubtitleProject 
 } from './database';
 import { isCueProperlyTranslated } from '../lib/subtitleParser';
@@ -241,6 +244,10 @@ export interface WorkerStatus {
   maxConcurrentProjects: number;
   maxTotalParallelKeys: number;
   inFlightKeyThreads: number;
+  priorityProjectCount: number;
+  queuedProjectCount: number;
+  incompleteProjectCount: number;
+  reserveKeysCount: number;
   activeProjects: ActiveProjectSummary[];
   // Backwards compatibility single-project properties
   activeProjectId: string | null;
@@ -295,6 +302,21 @@ export function getWorkerStatus(): WorkerStatus {
 
   const exhaustedCount = allKeys.filter((k) => isKeyExhausted(k)).length;
   const activeKeysCount = Math.max(0, allKeys.length - exhaustedCount);
+  const reserveKeysCount = Math.max(0, activeKeysCount - busyKeys.size);
+
+  const priorityProjectCount = db.projects.filter(
+    (p) => Boolean(p.isPriority) && p.status !== 'completed'
+  ).length;
+
+  const queuedProjectCount = db.projects.filter(
+    (p) => p.status === 'queued'
+  ).length;
+
+  const incompleteProjectCount = db.projects.filter((p) => {
+    if (p.status === 'completed') return false;
+    const rem = (p.items || []).filter((i) => !i.translatedText || !i.translatedText.trim()).length;
+    return rem > 0;
+  }).length;
 
   const firstActiveComplete = firstActive && (firstActive.status === 'completed' || firstActive.translatedCues >= firstActive.totalCues);
   const firstActivePct = firstActive && firstActive.totalCues > 0 
@@ -307,6 +329,10 @@ export function getWorkerStatus(): WorkerStatus {
     maxConcurrentProjects: config.maxConcurrentProjects || 4,
     maxTotalParallelKeys: config.maxTotalParallelKeys || 8,
     inFlightKeyThreads: busyKeys.size,
+    priorityProjectCount,
+    queuedProjectCount,
+    incompleteProjectCount,
+    reserveKeysCount,
     activeProjects: activeProjectsSummaries,
     activeProjectId: firstActive ? firstActive.id : (queuedProject ? queuedProject.id : null),
     activeProjectName: firstActive ? firstActive.name : (queuedProject ? queuedProject.name : null),
@@ -1000,9 +1026,18 @@ async function processTick(): Promise<void> {
   if (candidateProjects.length === 0) return;
 
   // Prioritize candidates:
-  // 1. Projects already partially translated with fewer remaining cues (SRJF: finish incomplete files first!)
-  // 2. Queued projects
+  // 1. Emergency Priority files first! (User clicked "ترجمه فایل‌های ناقص" or manual promote)
+  // 2. Projects already partially translated with fewer remaining cues (SRJF: finish incomplete files first!)
+  // 3. Queued projects
   candidateProjects.sort((a, b) => {
+    const aPri = Boolean(a.isPriority);
+    const bPri = Boolean(b.isPriority);
+    if (aPri !== bPri) {
+      return aPri ? -1 : 1;
+    }
+    if (aPri && bPri && a.priorityLevel && b.priorityLevel && a.priorityLevel !== b.priorityLevel) {
+      return b.priorityLevel - a.priorityLevel;
+    }
     const remA = a.items.filter((i) => !i.translatedText || !i.translatedText.trim()).length;
     const remB = b.items.filter((i) => !i.translatedText || !i.translatedText.trim()).length;
     return remA - remB;
@@ -1065,9 +1100,26 @@ async function processTick(): Promise<void> {
       } finally {
         chunkCues.forEach((c) => inFlightCueKeys.delete(project.id + '_' + c.id));
         busyKeys.delete(leasedKey);
+        // Instant key switching: As soon as any file completes a chunk or frees up its key,
+        // immediately trigger the next tick so reserve keys / free slots switch to the next file without delay!
+        setTimeout(() => {
+          void processTick();
+        }, 50);
       }
     })();
   }
+}
+
+export function triggerEmergencyIncompleteTranslation(folderId?: string): {
+  retriedCount: number;
+  projectNames: string[];
+} {
+  const result = retryDisruptedAndIncompleteProjects(folderId);
+  resetWorkerExhaustionBackoff();
+  setTimeout(() => {
+    void processTick();
+  }, 10);
+  return result;
 }
 
 /**

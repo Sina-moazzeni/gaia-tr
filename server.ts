@@ -57,6 +57,7 @@ import {
   resetKeyStats,
   auditAndFixEnglishCues,
   retryDisruptedAndIncompleteProjects,
+  setProjectPriority,
   getDisabledKeysList,
   clearAllDisabledKeys,
   ServerSubtitleProject
@@ -75,7 +76,8 @@ import {
   resetWorkerExhaustionBackoff,
   pauseAllTranslations,
   resumeAllTranslations,
-  turboCompleteIncompleteProjects
+  turboCompleteIncompleteProjects,
+  triggerEmergencyIncompleteTranslation
 } from './src/server/backgroundWorker';
 
 dotenv.config();
@@ -2746,17 +2748,17 @@ app.post('/api/server/config', (req, res) => {
   }
 });
 
-// 16b. Retry disrupted, error, or incomplete projects across all folders or a specific folder
+// 16b. Emergency Priority Retry for disrupted, error, or incomplete projects across all folders or a specific folder
 app.post('/api/projects/retry-incomplete', (req, res) => {
   try {
     const { folderId } = req.body || {};
-    const result = retryDisruptedAndIncompleteProjects(folderId);
+    const result = triggerEmergencyIncompleteTranslation(folderId);
     return res.json({
       success: true,
       retriedCount: result.retriedCount,
       projectNames: result.projectNames,
       message: result.retriedCount > 0
-        ? `تعداد ${result.retriedCount} فایل دارای خطا یا ناقص برای ادامه ترجمه و رفع اختلال مجدداً در صف قرار گرفتند.`
+        ? `تعداد ${result.retriedCount} فایل ناقص در لیست اضطراری (اولویت ۱) قرار گرفتند و فوراً با کلیدهای اختصاصی فعال شدند.`
         : 'هیچ فایل دارای خطا یا ناقصی یافت نشد. همه فایل‌ها تکمیل شده یا در حال ترجمه هستند.',
     });
   } catch (err: any) {
@@ -2766,14 +2768,44 @@ app.post('/api/projects/retry-incomplete', (req, res) => {
 
 app.post('/api/folders/:folderId/retry-incomplete', (req, res) => {
   try {
-    const result = retryDisruptedAndIncompleteProjects(req.params.folderId);
+    const result = triggerEmergencyIncompleteTranslation(req.params.folderId);
     return res.json({
       success: true,
       retriedCount: result.retriedCount,
       projectNames: result.projectNames,
       message: result.retriedCount > 0
-        ? `تعداد ${result.retriedCount} فایل دارای خطا در این پوشه برای رفع اختلال و ادامه ترجمه در صف قرار گرفتند.`
+        ? `تعداد ${result.retriedCount} فایل ناقص این پوشه به لیست اضطراری منتقل و ترجمه فوری آن‌ها آغاز شد.`
         : 'تمام فایل‌های این پوشه سالم و بدون اختلال هستند.',
+    });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message });
+  }
+});
+
+// 16c. Promote single project to Emergency Priority
+app.post('/api/projects/:id/prioritize', (req, res) => {
+  try {
+    const updated = setProjectPriority(req.params.id, true);
+    if (!updated) return res.status(404).json({ success: false, error: 'پروژه یافت نشد.' });
+    resetWorkerExhaustionBackoff();
+    return res.json({
+      success: true,
+      project: updated,
+      message: `فایل "${updated.name}" به لیست اضطراری (اولویت اول) ارتقا یافت و در رأس صف پردازش قرار گرفت.`,
+    });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message });
+  }
+});
+
+app.post('/api/projects/:id/deprioritize', (req, res) => {
+  try {
+    const updated = setProjectPriority(req.params.id, false);
+    if (!updated) return res.status(404).json({ success: false, error: 'پروژه یافت نشد.' });
+    return res.json({
+      success: true,
+      project: updated,
+      message: `فایل "${updated.name}" از لیست اضطراری خارج شد.`,
     });
   } catch (err: any) {
     return res.status(500).json({ success: false, error: err?.message });
