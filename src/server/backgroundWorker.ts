@@ -20,6 +20,7 @@ import {
   ServerSubtitleProject 
 } from './database';
 import { isCueProperlyTranslated } from '../lib/subtitleParser';
+import { SubtitleItem } from '../types';
 
 // Primary & Fallback Models hierarchy:
 // EXCLUSIVELY Gemini 3.5 Flash Lite as primary, and Gemini 3.1 Flash Lite if server 503 load occurs.
@@ -38,12 +39,12 @@ export function getActiveTranslationModel(): string {
   return activeTranslationModel;
 }
 
-// Optimized batch size: 40 cues per request gives rich 2-3 minute episodic context while keeping prompt token repetition minimal
-const BATCH_SIZE = 40;
+// Optimized batch size: 50 cues per request gives rich episodic context while maximizing throughput
+const BATCH_SIZE = 50;
 
 // Rate limiting & RPM pacing (minimum gap between requests on the same key ensures <15 RPM without hitting 429)
 const lastKeyCallTime = new Map<string, number>();
-const MIN_CALL_GAP_PER_KEY_MS = 4200; // 4.2 seconds minimum gap per key
+const MIN_CALL_GAP_PER_KEY_MS = 2500; // 2.5 seconds minimum gap per key
 
 // Progressive Patient Backoff: ensures the system never rushes when all keys hit rate limits or exhaustion
 let consecutiveAllExhaustedRounds = 0;
@@ -57,7 +58,8 @@ export function resetWorkerExhaustionBackoff(): void {
 }
 
 let workerInterval: NodeJS.Timeout | null = null;
-const activeProjectJobIds = new Set<string>();
+// Track in-flight cues across all parallel workers: "${projectId}_${cueId}"
+const inFlightCueKeys = new Set<string>();
 const busyKeys = new Set<string>();
 
 export interface ActiveProjectSummary {
@@ -91,7 +93,7 @@ export interface WorkerStatus {
   fallbackActive: boolean;
 }
 
-let lastWorkerStatusMessage = 'موتور ترجمه چندمسیره پس‌زمینه آماده است (مدل اصلی: Gemini 2.5/3.5 Flash Lite با سوییچ هوشمند خودکار).';
+let lastWorkerStatusMessage = 'موتور ترجمه چندمسیره پس‌زمینه آماده است (مدل اصلی: Gemini 3.5 Flash Lite با سوییچ هوشمند خودکار).';
 
 export function getWorkerStatus(): WorkerStatus {
   const allKeys = getServerKeys();
@@ -99,7 +101,7 @@ export function getWorkerStatus(): WorkerStatus {
   const config = getServerConfig();
 
   const translatingProjects = db.projects.filter(
-    (p) => p.status === 'translating' || activeProjectJobIds.has(p.id)
+    (p) => p.status === 'translating' || Array.from(inFlightCueKeys).some((k) => k.startsWith(p.id + '_'))
   );
 
   const activeProjectsSummaries: ActiveProjectSummary[] = translatingProjects.map((p) => {
@@ -126,7 +128,7 @@ export function getWorkerStatus(): WorkerStatus {
   return {
     isRunning: Boolean(workerInterval),
     activeProjectCount: translatingProjects.length,
-    maxConcurrentProjects: config.maxConcurrentProjects || 4,
+    maxConcurrentProjects: config.maxConcurrentProjects || 8,
     activeProjects: activeProjectsSummaries,
     activeProjectId: firstActive ? firstActive.id : (queuedProject ? queuedProject.id : null),
     activeProjectName: firstActive ? firstActive.name : (queuedProject ? queuedProject.name : null),
@@ -489,57 +491,18 @@ export async function translateBatchWithDedicatedKey(
 }
 
 /**
- * Process a single project batch inside a dedicated worker slot
+ * Process a single chunk of subtitle cues for a project inside a dedicated worker slot
  */
-async function processSingleProjectBatch(projectId: string): Promise<void> {
+async function processProjectChunkBatch(
+  projectId: string,
+  chunkCues: SubtitleItem[],
+  leasedKey: string
+): Promise<void> {
   const project = getProjectById(projectId);
   if (!project) return;
 
-  // Find cues in this project that still need translation (either empty or left in English)
-  const untranslatedCues = project.items.filter(
-    (item) => !isCueProperlyTranslated(item.originalText, item.translatedText, project.targetLanguage)
-  );
-
-  if (untranslatedCues.length === 0) {
-    project.status = 'completed';
-    project.completedAt = new Date().toISOString();
-    project.translatedCues = project.totalCues;
-    project.failedCueIds = [];
-    project.errorMessage = undefined;
-    project.lastError = undefined;
-    saveDatabaseSync();
-    lastWorkerStatusMessage = `ترجمه فایل "${project.name}" با موفقیت ۱۰۰٪ و بدون سطر انگلیسی تأیید شد.`;
-    console.log(`[BackgroundWorker] Project ${project.name} (${project.id}) fully completed and verified!`);
-    return;
-  }
-
-  // Lease a key from pool that is not locked by another concurrent worker
   const allKeys = getServerKeys();
-  if (allKeys.length === 0) {
-    project.status = 'waiting_for_keys';
-    project.lastError = 'کلید API جمینای در سرور تنظیم نشده است. لطفاً در پنل مدیریت، کلیدهای Gemini را وارد کنید.';
-    project.errorMessage = project.lastError;
-    saveDatabaseSync();
-    return;
-  }
-
-  const keyInfo = leaseAvailableKey(Array.from(busyKeys));
-  if (!keyInfo) {
-    // All keys in the pool are exhausted or locked
-    project.status = 'waiting_for_keys';
-    project.lastError = 'تمامی کلیدهای سرور موقتاً سهمیه خود را تمام کرده‌اند (429). ترجمه به طور خودکار به محض آزادسازی کلید یا افزودن کلید جدید ادامه خواهد یافت (تمام سطرهای قبلی ذخیره شده‌اند).';
-    project.errorMessage = project.lastError;
-    saveDatabaseSync();
-    return;
-  }
-
-  const leasedKey = keyInfo.key;
-  busyKeys.add(leasedKey);
-  project.workerKeyUsed = leasedKey;
-  project.status = 'translating';
-
-  const batchCues = untranslatedCues.slice(0, BATCH_SIZE);
-  const simplifiedBatch = batchCues.map((c) => ({ id: c.id, text: c.originalText }));
+  const simplifiedBatch = chunkCues.map((c) => ({ id: c.id, text: c.originalText }));
 
   // Gather folder name and recent translated cues for continuity context
   const folder = getFolderById(project.folderId);
@@ -595,8 +558,6 @@ async function processSingleProjectBatch(projectId: string): Promise<void> {
     project.tokenUsage.promptTokens += result.tokens.prompt;
     project.tokenUsage.candidatesTokens += result.tokens.candidates;
     project.tokenUsage.totalTokens += result.tokens.total;
-    project.currentBatchIndex++;
-    project.totalBatches = Math.ceil(project.totalCues / BATCH_SIZE);
     project.lastError = undefined;
     project.errorMessage = undefined;
 
@@ -610,14 +571,19 @@ async function processSingleProjectBatch(projectId: string): Promise<void> {
       (i) => !isCueProperlyTranslated(i.originalText, i.translatedText, project.targetLanguage)
     );
 
-    if (remainingUntranslated.length === 0) {
+    const hasOtherInFlight = Array.from(inFlightCueKeys).some(
+      (k) => k.startsWith(project.id + '_') && !chunkCues.some((b) => k === project.id + '_' + b.id)
+    );
+
+    if (remainingUntranslated.length === 0 && !hasOtherInFlight) {
       project.status = 'completed';
       project.completedAt = new Date().toISOString();
       project.translatedCues = project.totalCues;
       project.failedCueIds = [];
       lastWorkerStatusMessage = `ترجمه فایل "${project.name}" با موفقیت ۱۰۰٪ و بدون سطر انگلیسی تکمیل شد.`;
+      console.log(`[BackgroundWorker] Project ${project.name} (${project.id}) fully completed and verified!`);
     } else {
-      const pct = Math.round((project.translatedCues / project.totalCues) * 100);
+      const pct = project.totalCues > 0 ? Math.round((project.translatedCues / project.totalCues) * 100) : 0;
       lastWorkerStatusMessage = `فایل "${project.name}": ترجمه معتبر ${project.translatedCues} از ${project.totalCues} سطر (${pct}%)`;
     }
 
@@ -633,16 +599,13 @@ async function processSingleProjectBatch(projectId: string): Promise<void> {
       project.lastError = 'سهمیه کلیدهای سرور تمام شد. ترجمه بدون از دست رفتن سطرها متوقف و منتظر بازیابی سهمیه است.';
       project.errorMessage = project.lastError;
     } else {
-      project.status = 'has_incomplete';
       project.lastError = `خطا در ترجمه دسته سطرهای اخیر: ${errMsg}`;
       project.errorMessage = project.lastError;
-      project.failedCueIds = batchCues.map((c) => c.id);
+      project.failedCueIds = chunkCues.map((c) => c.id);
     }
 
     saveDatabaseSync();
     lastWorkerStatusMessage = `خطا در ترجمه "${project.name}": ${errMsg.slice(0, 80)}`;
-  } finally {
-    busyKeys.delete(leasedKey);
   }
 }
 
@@ -755,10 +718,10 @@ async function processTick(): Promise<void> {
     return;
   }
 
-  const maxWorkers = Math.max(1, Math.min(config.maxConcurrentProjects || 4, Math.max(1, allKeys.length)));
+  const maxWorkers = Math.max(1, Math.min(config.maxConcurrentProjects || 8, Math.max(1, allKeys.length)));
 
   // Check how many worker slots are open
-  const availableSlots = maxWorkers - activeProjectJobIds.size;
+  let availableSlots = maxWorkers - busyKeys.size;
   if (availableSlots <= 0) return;
 
   // Find candidate projects needing work:
@@ -766,7 +729,6 @@ async function processTick(): Promise<void> {
   // 2. Projects in 'queued' status
   // 3. Projects in 'waiting_for_keys' (if non-exhausted keys are now available)
   const candidateProjects = db.projects.filter((p) => {
-    if (activeProjectJobIds.has(p.id)) return false;
     if (p.status === 'translating') return true;
     if (p.status === 'queued') return true;
     if (p.status === 'waiting_for_keys') {
@@ -775,23 +737,67 @@ async function processTick(): Promise<void> {
     return false;
   });
 
-  const projectsToDispatch = candidateProjects.slice(0, availableSlots);
+  if (candidateProjects.length === 0) return;
 
-  for (const project of projectsToDispatch) {
-    activeProjectJobIds.add(project.id);
-    project.status = 'translating';
-    saveDatabaseSync();
+  // Dispatch parallel chunks across candidate projects
+  for (const project of candidateProjects) {
+    if (availableSlots <= 0) break;
 
-    // Run each project batch concurrently
-    void (async () => {
-      try {
-        await processSingleProjectBatch(project.id);
-      } catch (e) {
-        console.error(`[BackgroundWorker] Unexpected error in worker for ${project.id}:`, e);
-      } finally {
-        activeProjectJobIds.delete(project.id);
+    const untranslatedCues = project.items.filter(
+      (item) => !isCueProperlyTranslated(item.originalText, item.translatedText, project.targetLanguage)
+    );
+
+    if (untranslatedCues.length === 0) {
+      const hasInFlight = Array.from(inFlightCueKeys).some((k) => k.startsWith(project.id + '_'));
+      if (!hasInFlight && project.status !== 'completed') {
+        project.status = 'completed';
+        project.completedAt = new Date().toISOString();
+        project.translatedCues = project.totalCues;
+        project.failedCueIds = [];
+        saveDatabaseSync();
       }
-    })();
+      continue;
+    }
+
+    const availableCues = untranslatedCues.filter((c) => !inFlightCueKeys.has(project.id + '_' + c.id));
+    if (availableCues.length === 0) {
+      // Remaining cues are currently being processed by parallel workers
+      continue;
+    }
+
+    // Allocate parallel chunks to this project
+    const maxChunksForProject = candidateProjects.length === 1
+      ? availableSlots
+      : Math.max(1, Math.min(availableSlots, Math.ceil(availableSlots / candidateProjects.length)));
+
+    let chunksDispatched = 0;
+    while (availableCues.length > 0 && availableSlots > 0 && chunksDispatched < maxChunksForProject) {
+      const keyInfo = leaseAvailableKey(Array.from(busyKeys));
+      if (!keyInfo) break; // No more available idle keys
+
+      const leasedKey = keyInfo.key;
+      busyKeys.add(leasedKey);
+      availableSlots--;
+      chunksDispatched++;
+
+      const chunkCues = availableCues.splice(0, BATCH_SIZE);
+      chunkCues.forEach((c) => inFlightCueKeys.add(project.id + '_' + c.id));
+
+      project.status = 'translating';
+      project.workerKeyUsed = leasedKey;
+      saveDatabaseSync();
+
+      void (async () => {
+        try {
+          await processProjectChunkBatch(project.id, chunkCues, leasedKey);
+        } catch (e) {
+          console.error(`[BackgroundWorker] Unexpected error in worker for ${project.id}:`, e);
+        } finally {
+          chunkCues.forEach((c) => inFlightCueKeys.delete(project.id + '_' + c.id));
+          busyKeys.delete(leasedKey);
+        }
+      })();
+    }
   }
 }
 
@@ -805,7 +811,7 @@ export function startBackgroundWorker(): void {
     void processTick().catch((err) => {
       console.error('[BackgroundWorker] Unhandled loop error:', err);
     });
-  }, 1800);
+  }, 1000);
 }
 
 /**
@@ -909,7 +915,7 @@ export function pauseAllTranslations(): number {
     }
   });
 
-  activeProjectJobIds.clear();
+  inFlightCueKeys.clear();
   busyKeys.clear();
   lastWorkerStatusMessage = `تمام عملیات ترجمه سرور توسط کاربر متوقف شد (${pausedCount} فایل زیرنویس متوقف شدند).`;
   saveDatabaseSync();

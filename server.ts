@@ -48,6 +48,7 @@ import {
   updateServerConfig,
   createBackupJson,
   restoreBackupJson,
+  restoreBackupFileDirect,
   getDatabaseFilePath,
   getKeyExhaustionStatus,
   batchReplaceInFolder,
@@ -160,8 +161,8 @@ function aiRateLimiter(req: express.Request, res: express.Response, next: expres
 //    ALLOW_SERVER_KEY=false — then every user MUST bring their own key (BYOK).
 const serverKeyAllowed = () => process.env.ALLOW_SERVER_KEY !== 'false' && Boolean(process.env.GEMINI_API_KEY?.trim());
 
-app.use(express.json({ limit: '50mb' }));
-app.use(express.urlencoded({ extended: true, limit: '50mb' }));
+app.use(express.json({ limit: '500mb' }));
+app.use(express.urlencoded({ extended: true, limit: '500mb' }));
 
 // Lazy initializer for GoogleGenAI
 function getGenAIClient(customApiKey?: string): GoogleGenAI {
@@ -2329,7 +2330,16 @@ app.delete('/api/folders/:id', (req, res) => {
 app.get('/api/folders/:folderId/projects', (req, res) => {
   try {
     const projects = getProjectsByFolder(req.params.folderId);
-    return res.json({ success: true, projects });
+    const includeItems = req.query.includeItems === 'true';
+    if (includeItems) {
+      return res.json({ success: true, projects });
+    }
+    // High-performance bandwidth saver: omit heavy items array for list views
+    const sanitized = projects.map((p) => {
+      const { items, rawHeader, ...meta } = p;
+      return { ...meta, itemsCount: items ? items.length : 0 };
+    });
+    return res.json({ success: true, projects: sanitized });
   } catch (err: any) {
     return res.status(500).json({ success: false, error: err?.message || 'Failed to fetch folder projects' });
   }
@@ -2516,11 +2526,24 @@ app.get('/api/projects', (req, res) => {
     const projects = getAllProjects();
     const folders = getAllFolders();
     const folderMap = new Map(folders.map((f) => [f.id, f.name]));
-    const enriched = projects.map((p) => ({
-      ...p,
-      folderName: folderMap.get(p.folderId) || 'پوشه نامشخص',
-    }));
-    return res.json({ success: true, projects: enriched });
+    const includeItems = req.query.includeItems === 'true';
+
+    const sanitized = projects.map((p) => {
+      if (includeItems) {
+        return {
+          ...p,
+          folderName: folderMap.get(p.folderId) || 'پوشه نامشخص',
+        };
+      }
+      // High-performance bandwidth saver: omit heavy items array for list views
+      const { items, rawHeader, ...meta } = p;
+      return {
+        ...meta,
+        itemsCount: items ? items.length : 0,
+        folderName: folderMap.get(p.folderId) || 'پوشه نامشخص',
+      };
+    });
+    return res.json({ success: true, projects: sanitized });
   } catch (err: any) {
     return res.status(500).json({ success: false, error: err?.message });
   }
@@ -2930,6 +2953,32 @@ app.post('/api/backup/restore', (req, res) => {
   } catch (err: any) {
     return res.status(500).json({ success: false, error: err?.message || 'Failed to restore backup' });
   }
+});
+
+// 22b. Stream restore endpoint for huge backup files (supports 176MB+ without high RAM usage)
+app.post('/api/backup/restore-stream', (req, res) => {
+  const dbDir = path.dirname(getDatabaseFilePath());
+  if (!fs.existsSync(dbDir)) fs.mkdirSync(dbDir, { recursive: true });
+  const tempPath = path.join(dbDir, `restore_temp_${Date.now()}.json`);
+  const writeStream = fs.createWriteStream(tempPath);
+
+  req.pipe(writeStream);
+
+  writeStream.on('finish', () => {
+    try {
+      const result = restoreBackupFileDirect(tempPath);
+      try { fs.unlinkSync(tempPath); } catch {}
+      return res.json(result);
+    } catch (err: any) {
+      try { fs.unlinkSync(tempPath); } catch {}
+      return res.status(500).json({ success: false, error: err?.message || 'Restore processing failed' });
+    }
+  });
+
+  writeStream.on('error', (err) => {
+    try { fs.unlinkSync(tempPath); } catch {}
+    return res.status(500).json({ success: false, error: err?.message || 'Stream write failed' });
+  });
 });
 
 // 23. Server and Storage Information (for VPS & local disk clarity)

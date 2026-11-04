@@ -259,12 +259,33 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
   const [cuesSearch, setCuesSearch] = useState('');
   const [isSavingProjectItems, setIsSavingProjectItems] = useState(false);
 
-  const handleOpenViewingProjectModal = (proj: ServerProjectItem, folderName?: string) => {
+  const [isLoadingViewingProject, setIsLoadingViewingProject] = useState(false);
+
+  const handleOpenViewingProjectModal = async (proj: ServerProjectItem, folderName?: string) => {
     setViewingProject(proj);
     setViewingProjectFolderName(folderName || selectedFolder?.name || '');
-    setEditedCues(JSON.parse(JSON.stringify(proj.items || [])));
     setCuesFilter('all');
     setCuesSearch('');
+
+    if (proj.items && Array.isArray(proj.items) && proj.items.length > 0) {
+      setEditedCues(JSON.parse(JSON.stringify(proj.items)));
+    } else {
+      setIsLoadingViewingProject(true);
+      try {
+        const res = await fetch(`/api/projects/${proj.id}`);
+        const data = await res.json();
+        if (data.success && data.project) {
+          setViewingProject(data.project);
+          setEditedCues(JSON.parse(JSON.stringify(data.project.items || [])));
+        } else {
+          setEditedCues([]);
+        }
+      } catch {
+        setEditedCues([]);
+      } finally {
+        setIsLoadingViewingProject(false);
+      }
+    }
   };
 
   const handleSaveViewingProjectChanges = async () => {
@@ -466,37 +487,86 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
     }
   }, [selectedFolderId, activeView]);
 
-  // Polling for live translation updates
+  // Polling for live translation updates: lightweight status check every 2.5s, full lists refresh every 15s
   useEffect(() => {
+    let tickCount = 0;
     const interval = setInterval(() => {
-      fetchWorkerStatus();
-      if (selectedFolderId && activeView === 'inside_folder') {
-        fetch(`/api/folders/${selectedFolderId}/projects`)
-          .then((res) => res.json())
-          .then((data) => {
-            if (data.success && Array.isArray(data.projects)) {
-              setProjects(data.projects);
-            }
-          })
-          .catch(() => {});
-      }
-      fetch('/api/folders')
+      tickCount++;
+      // 1. Ultra lightweight background status check (~300 bytes) every 2.5s
+      fetch('/api/background/status')
         .then((res) => res.json())
         .then((data) => {
-          if (data.success && Array.isArray(data.folders)) {
-            setFolders(data.folders);
+          if (data.success && data.status) {
+            setWorkerStatus(data.status);
+            // Smoothly sync live progress into current project cards without downloading full DB
+            if (Array.isArray(data.status.activeProjects)) {
+              const activeMap = new Map<string, { translatedCues: number; totalCues: number; progressPercent: number }>(
+                data.status.activeProjects.map((ap: any) => [ap.id, ap])
+              );
+              setProjects((prev) =>
+                prev.map((p) => {
+                  const active = activeMap.get(p.id);
+                  if (active) {
+                    return {
+                      ...p,
+                      translatedCues: active.translatedCues,
+                      totalCues: active.totalCues,
+                      status: active.translatedCues >= active.totalCues ? 'completed' : 'translating',
+                    };
+                  }
+                  return p;
+                })
+              );
+              setAllProjects((prev) =>
+                prev.map((p) => {
+                  const active = activeMap.get(p.id);
+                  if (active) {
+                    return {
+                      ...p,
+                      translatedCues: active.translatedCues,
+                      totalCues: active.totalCues,
+                      status: active.translatedCues >= active.totalCues ? 'completed' : 'translating',
+                    };
+                  }
+                  return p;
+                })
+              );
+            }
           }
         })
         .catch(() => {});
-      if (activeView === 'all_files') {
-        fetch('/api/projects')
+
+      // 2. Full project list & folders count refresh only every 15 seconds (tickCount % 6 === 0)
+      // This prevents massive background data usage while keeping the UI synchronized
+      if (tickCount % 6 === 0) {
+        if (selectedFolderId && activeView === 'inside_folder') {
+          fetch(`/api/folders/${selectedFolderId}/projects`)
+            .then((res) => res.json())
+            .then((data) => {
+              if (data.success && Array.isArray(data.projects)) {
+                setProjects(data.projects);
+              }
+            })
+            .catch(() => {});
+        }
+        fetch('/api/folders')
           .then((res) => res.json())
           .then((data) => {
-            if (data.success && Array.isArray(data.projects)) {
-              setAllProjects(data.projects);
+            if (data.success && Array.isArray(data.folders)) {
+              setFolders(data.folders);
             }
           })
           .catch(() => {});
+        if (activeView === 'all_files') {
+          fetch('/api/projects')
+            .then((res) => res.json())
+            .then((data) => {
+              if (data.success && Array.isArray(data.projects)) {
+                setAllProjects(data.projects);
+              }
+            })
+            .catch(() => {});
+        }
       }
     }, 2500);
 
@@ -1020,10 +1090,11 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
     }
     setIsRestoring(true);
     try {
-      const res = await fetch('/api/backup/restore', {
+      const blob = new Blob([jsonString], { type: 'application/octet-stream' });
+      const res = await fetch('/api/backup/restore-stream', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ backupContent: jsonString }),
+        headers: { 'Content-Type': 'application/octet-stream' },
+        body: blob,
       });
       const data = await res.json();
       if (data.success) {
@@ -1034,6 +1105,7 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
         if (selectedFolderId) {
           await fetchProjects(selectedFolderId);
         }
+        await fetchAllProjects();
       } else {
         onShowToast(data.error || 'خطا در بازیابی نسخه پشتیبان', 'error');
       }
@@ -1044,20 +1116,38 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
     }
   };
 
-  // File upload for restore
-  const handleRestoreFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  // Streaming File upload for restore: handles files of any size (e.g. 176MB) smoothly without memory freeze
+  const handleRestoreFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
-    const reader = new FileReader();
-    reader.onload = (event) => {
-      const content = event.target?.result as string;
-      if (content) {
-        setRestoreJsonText(content);
-        handleRestoreSubmit(content);
+    setIsRestoring(true);
+    const sizeMb = (file.size / (1024 * 1024)).toFixed(1);
+    onShowToast(`در حال استریم و بازیابی فایل نسخه پشتیبان (${sizeMb} مگابایت) به سرور... لطفاً کمی شکیبا باشید.`, 'info');
+    try {
+      const res = await fetch('/api/backup/restore-stream', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/octet-stream' },
+        body: file,
+      });
+      const data = await res.json();
+      if (data.success) {
+        onShowToast(data.message || `دیتابیس سرور با موفقیت از فایل ${file.name} بازیابی شد.`, 'success');
+        setIsRestoreModalOpen(false);
+        setRestoreJsonText('');
+        await fetchFolders();
+        if (selectedFolderId) {
+          await fetchProjects(selectedFolderId);
+        }
+        await fetchAllProjects();
+      } else {
+        onShowToast(data.error || 'خطا در بازیابی دیتابیس', 'error');
       }
-    };
-    reader.readAsText(file);
-    if (restoreFileInputRef.current) restoreFileInputRef.current.value = '';
+    } catch (err: any) {
+      onShowToast('خطا در ارسال فایل پشتیبان: ' + (err?.message || 'قطع ارتباط'), 'error');
+    } finally {
+      setIsRestoring(false);
+      if (restoreFileInputRef.current) restoreFileInputRef.current.value = '';
+    }
   };
 
   // Direct Server-Side Key Ping Test
@@ -2778,16 +2868,16 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
                   <input
                     type="range"
                     min={1}
-                    max={6}
+                    max={16}
                     step={1}
                     value={serverConfig.maxConcurrentProjects}
                     onChange={(e) => setServerConfig({ ...serverConfig, maxConcurrentProjects: Number(e.target.value) })}
                     className="w-full accent-amber-500 h-2 bg-slate-800 rounded-lg cursor-pointer"
                   />
-                  <span className="text-xs font-mono text-slate-300 shrink-0">۱ تا ۶</span>
+                  <span className="text-xs font-mono text-slate-300 shrink-0">۱ تا ۱۶</span>
                 </div>
                 <p className="text-[11px] text-slate-400 mt-1 leading-relaxed">
-                  موتور ترجمه پس‌زمینه به تعداد این عدد، فایل‌ها را با <span className="text-amber-300 font-bold">کلیدهای مجزا</span> به طور موازی ترجمه می‌کند تا حداکثر سرعت و بهره‌وری بدون برخورد به سهمیه کسب شود.
+                  موتور ترجمه پس‌زمینه به تعداد این عدد، فایل‌ها و تکه‌های زیرنویس را با <span className="text-amber-300 font-bold">کلیدهای مجزا به طور کاملاً موازی</span> ترجمه می‌کند تا حداکثر سرعت کسب شود.
                 </p>
               </div>
 
@@ -3465,8 +3555,18 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
             </div>
 
             {/* Cues List */}
-            <div className="flex-1 overflow-y-auto p-4 flex flex-col gap-3 divide-y divide-slate-800/40">
-              {editedCues
+            {isLoadingViewingProject ? (
+              <div className="flex-1 flex flex-col items-center justify-center p-12 text-slate-400 gap-3">
+                <Loader2 className="w-8 h-8 animate-spin text-indigo-400" />
+                <span className="text-xs">در حال بارگذاری سطرهای زیرنویس از سرور...</span>
+              </div>
+            ) : editedCues.length === 0 ? (
+              <div className="flex-1 flex flex-col items-center justify-center p-12 text-slate-500 text-xs">
+                هیچ سطری در این فایل یافت نشد یا در حال دریافت است.
+              </div>
+            ) : (
+              <div className="flex-1 overflow-y-auto p-4 flex flex-col gap-3 divide-y divide-slate-800/40">
+                {editedCues
                 .filter((cue) => {
                   const isTranslated = isCueProperlyTranslated(cue.originalText, cue.translatedText, 'fa');
                   if (cuesFilter === 'translated' && !isTranslated) return false;
@@ -3536,7 +3636,8 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
                     </div>
                   );
                 })}
-            </div>
+              </div>
+            )}
 
             {/* Modal Footer */}
             <div className="p-3 sm:p-4 bg-slate-950 border-t border-slate-800 flex items-center justify-between gap-3 flex-wrap text-xs">

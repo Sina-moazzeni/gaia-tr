@@ -89,7 +89,7 @@ function ensureDataDir() {
 const DEFAULT_SERVER_CONFIG: ServerConfig = {
   allowedOrigin: process.env.ALLOWED_ORIGIN?.trim() || '*',
   geminiBaseUrl: process.env.GEMINI_BASE_URL?.trim() || 'https://generativelanguage.googleapis.com',
-  maxConcurrentProjects: Number(process.env.MAX_CONCURRENT_PROJECTS) || 4,
+  maxConcurrentProjects: Number(process.env.MAX_CONCURRENT_PROJECTS) || 8,
 };
 
 function loadDatabaseFromDisk(): SubtitlesDatabase {
@@ -476,7 +476,7 @@ export function updateServerConfig(updates: Partial<ServerConfig>): ServerConfig
   }
   if (updates.maxConcurrentProjects !== undefined) {
     const val = Number(updates.maxConcurrentProjects);
-    db.serverConfig.maxConcurrentProjects = Math.max(1, Math.min(val || 4, 16));
+    db.serverConfig.maxConcurrentProjects = Math.max(1, Math.min(val || 8, 24));
   }
   saveDatabaseSync();
   return db.serverConfig;
@@ -877,6 +877,34 @@ export function restoreBackupJson(jsonString: string): { success: boolean; folde
     };
   } catch (err: any) {
     return { success: false, foldersCount: 0, projectsCount: 0, error: err?.message || 'خطا در خواندن فایل پشتیبان' };
+  }
+}
+
+export function restoreBackupFileDirect(filePath: string): { success: boolean; foldersCount: number; projectsCount: number; error?: string } {
+  try {
+    const raw = fs.readFileSync(filePath, 'utf-8');
+    const parsed = JSON.parse(raw);
+    if (!parsed || !Array.isArray(parsed.folders) || !Array.isArray(parsed.projects)) {
+      return { success: false, foldersCount: 0, projectsCount: 0, error: 'فرمت فایل پشتیبان نامعتبر است (آرایه‌های پوشه یا پروژه‌ها یافت نشد).' };
+    }
+
+    const db = getDatabase();
+    db.folders = parsed.folders;
+    db.projects = parsed.projects;
+    if (parsed.stats) db.stats = parsed.stats;
+    if (Array.isArray(parsed.serverKeys) && parsed.serverKeys.length > 0) {
+      db.serverKeys = parsed.serverKeys;
+    }
+    saveDatabaseSync();
+    console.log(`[DB Restore] Successfully restored ${db.folders.length} folders and ${db.projects.length} projects from backup file (${(raw.length / (1024 * 1024)).toFixed(1)} MB).`);
+    return {
+      success: true,
+      foldersCount: db.folders.length,
+      projectsCount: db.projects.length,
+    };
+  } catch (err: any) {
+    console.error('[DB Restore] Error parsing backup file:', err);
+    return { success: false, foldersCount: 0, projectsCount: 0, error: err?.message || 'خطا در خواندن و بازیابی فایل پشتیبان' };
   }
 }
 
