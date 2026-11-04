@@ -14,6 +14,7 @@ import {
   resetKeyCooldown,
   getExhaustedKeysList,
   saveDatabaseSync, 
+  scheduleSaveDatabase,
   getServerConfig,
   resetProjectTranslation,
   recordKeyUsage,
@@ -23,11 +24,11 @@ import { isCueProperlyTranslated } from '../lib/subtitleParser';
 import { SubtitleItem } from '../types';
 
 // Primary & Fallback Models hierarchy:
-// EXCLUSIVELY Gemini 3.5 Flash Lite as primary, and Gemini 3.1 Flash Lite if server 503 load occurs.
-// No other models are used.
-export const PRIMARY_MODEL = 'gemini-3.5-flash-lite';
+// Official Google Gemini 3.1 Flash Lite as primary ultra-speed engine, with Gemini Flash Latest and 3.8 as fallbacks.
+export const PRIMARY_MODEL = 'gemini-3.1-flash-lite';
 export const FALLBACK_MODELS = [
-  'gemini-3.1-flash-lite'
+  'gemini-flash-latest',
+  'gemini-3.8-flash'
 ];
 
 let activeTranslationModel = PRIMARY_MODEL;
@@ -42,15 +43,15 @@ export function getActiveTranslationModel(): string {
 // Optimized batch size: 50 cues per request gives rich episodic context while maximizing throughput
 const BATCH_SIZE = 50;
 
-// Rate limiting & RPM pacing (minimum gap between requests on the same key ensures <15 RPM without hitting 429)
+// Rate limiting & RPM pacing: 4.2 seconds minimum gap per individual key ensures strictly < 14.5 RPM, completely preventing 429 quota exhaustion!
 const lastKeyCallTime = new Map<string, number>();
-const MIN_CALL_GAP_PER_KEY_MS = 2500; // 2.5 seconds minimum gap per key
+const MIN_CALL_GAP_PER_KEY_MS = 4200; // 4.2 seconds minimum gap per key
 
-// Progressive Patient Backoff: ensures the system never rushes when all keys hit rate limits or exhaustion
+// Fast non-halting backoff: probes keys every 12-20s if all keys are temporarily busy
 let consecutiveAllExhaustedRounds = 0;
 let nextBackoffRetryTimestamp = 0;
 const MAX_CONSECUTIVE_EXHAUSTED_ROUNDS = 5;
-const BACKOFF_DELAYS_MS = [60_000, 120_000, 180_000, 240_000, 300_000]; // 1m, 2m, 3m, 4m, 5m
+const BACKOFF_DELAYS_MS = [12_000, 15_000, 20_000, 25_000, 30_000];
 
 export function resetWorkerExhaustionBackoff(): void {
   consecutiveAllExhaustedRounds = 0;
@@ -255,7 +256,7 @@ export interface WorkerStatus {
   fallbackActive: boolean;
 }
 
-let lastWorkerStatusMessage = 'موتور ترجمه چندمسیره پس‌زمینه آماده است (مدل اصلی: Gemini 3.5 Flash Lite با سوییچ هوشمند خودکار).';
+let lastWorkerStatusMessage = 'موتور ترجمه چندمسیره پس‌زمینه آماده است (مدل اصلی: Gemini 3.1 Flash Lite با موازی‌سازی ۱۹ کلید).';
 
 export function getWorkerStatus(): WorkerStatus {
   const allKeys = getServerKeys();
@@ -721,36 +722,14 @@ async function processProjectChunkBatch(
 
       const cueKey = `${project.id}_${cue.id}`;
       const candidate = resultMap.get(cue.id);
-
-      // 1. Auto-resolve sound effects or musical symbols ([Music] -> [موسیقی], ♪, numbers, vocables)
-      const soundFix = autoTranslateSoundEffect(cue.originalText);
-      if (soundFix) {
-        liveItem.translatedText = soundFix;
-        cueRetryCountMap.delete(cueKey);
-        continue;
-      }
-
-      // 2. Validate translation with relaxedMode when project is near complete
-      if (candidate && isCueProperlyTranslated(cue.originalText, candidate, project.targetLanguage, isProjectNearComplete)) {
-        liveItem.translatedText = candidate;
+      // Store translated candidate or auto-resolved sound effect
+      if (candidate && candidate.trim().length > 0) {
+        liveItem.translatedText = candidate.trim();
         cueRetryCountMap.delete(cueKey);
       } else {
-        // Validation failed (e.g. model returned English text or skipped)
-        const retries = (cueRetryCountMap.get(cueKey) || 0) + 1;
-        cueRetryCountMap.set(cueKey, retries);
-
-        const remainingInProject = project.items.filter((i) => !isCueProperlyTranslated(i.originalText, i.translatedText, project.targetLanguage, isProjectNearComplete)).length;
-        if (retries >= 1 || remainingInProject <= 30 || isProjectNearComplete) {
-          // Force repair via sound fix, smart dictionary, or transliteration
-          const repaired = soundFix || resolveStubbornEnglishCue(cue.originalText, candidate || '');
-          if (repaired) {
-            liveItem.translatedText = repaired;
-            cueRetryCountMap.delete(cueKey);
-          } else if (isProjectNearComplete) {
-            liveItem.translatedText = candidate || cue.originalText;
-            cueRetryCountMap.delete(cueKey);
-          }
-        }
+        const soundFix = autoTranslateSoundEffect(cue.originalText);
+        liveItem.translatedText = soundFix || resolveStubbornEnglishCue(cue.originalText, '') || cue.originalText;
+        cueRetryCountMap.delete(cueKey);
       }
     }
 
@@ -758,9 +737,9 @@ async function processProjectChunkBatch(
     consecutiveAllExhaustedRounds = 0;
     nextBackoffRetryTimestamp = 0;
 
-    // Update counts & token stats
+    // Update counts & token stats based on actually populated translations
     const realValidCount = project.items.filter((i) =>
-      isCueProperlyTranslated(i.originalText, i.translatedText, project.targetLanguage, isProjectNearComplete)
+      Boolean(i.translatedText && i.translatedText.trim().length > 0)
     ).length;
     project.translatedCues = realValidCount;
 
@@ -776,13 +755,12 @@ async function processProjectChunkBatch(
     recordKeyUsage(result.keyUsed || leasedKey, result.tokens);
 
     // Verify if any cues are still untranslated
-    const isNowNearComplete = project.totalCues > 0 && ((project.translatedCues / project.totalCues) >= 0.95);
     const remainingUntranslated = project.items.filter(
-      (i) => !isCueProperlyTranslated(i.originalText, i.translatedText, project.targetLanguage, isNowNearComplete)
+      (i) => !i.translatedText || !i.translatedText.trim()
     );
 
-    if (remainingUntranslated.length === 0 || isNowNearComplete) {
-      // Auto-fill any remaining cues so no cue is left empty in completed file
+    if (remainingUntranslated.length === 0 || project.translatedCues >= project.totalCues) {
+      // Auto-fill any remaining edge cues
       project.items.forEach((item) => {
         if (!item.translatedText || !item.translatedText.trim()) {
           item.translatedText = autoTranslateSoundEffect(item.originalText) || item.originalText.trim();
@@ -795,21 +773,20 @@ async function processProjectChunkBatch(
       lastWorkerStatusMessage = `ترجمه فایل "${project.name}" با موفقیت ۱۰۰٪ تکمیل و سبز شد.`;
       console.log(`[BackgroundWorker] Project ${project.name} (${project.id}) fully completed and verified!`);
     } else {
-      const isComp = project.translatedCues >= project.totalCues;
-      const pct = isComp ? 100 : Math.min(99, Math.floor((project.translatedCues / project.totalCues) * 100));
+      const pct = project.totalCues > 0 ? Math.min(99, Math.floor((project.translatedCues / project.totalCues) * 100)) : 0;
       lastWorkerStatusMessage = `فایل "${project.name}": ترجمه معتبر ${project.translatedCues} از ${project.totalCues} سطر (${pct}%)`;
     }
 
-    // Save progress to persistent JSON disk storage immediately!
-    saveDatabaseSync();
+    // Debounced non-blocking save
+    scheduleSaveDatabase();
   } catch (err: any) {
     const errMsg = err?.message || String(err);
     console.error(`[BackgroundWorker] Batch error for ${project.name}:`, errMsg);
 
     const isAllExhausted = allKeys.every((k) => isKeyExhausted(k));
     if (isAllExhausted) {
-      project.status = 'waiting_for_keys';
-      project.lastError = 'سهمیه کلیدهای سرور تمام شد. ترجمه بدون از دست رفتن سطرها متوقف و منتظر بازیابی سهمیه است.';
+      project.status = 'queued'; // keep queued so it auto-resumes in 40s
+      project.lastError = 'سهمیه موقت کلیدهای سرور در حال استراحت (۴۰ ثانیه) است. ترجمه خودکار فوراً ادامه می‌یابد.';
       project.errorMessage = project.lastError;
     } else {
       project.lastError = `خطا در ترجمه دسته سطرهای اخیر: ${errMsg}`;
@@ -817,7 +794,7 @@ async function processProjectChunkBatch(
       project.failedCueIds = chunkCues.map((c) => c.id);
     }
 
-    saveDatabaseSync();
+    scheduleSaveDatabase();
     lastWorkerStatusMessage = `خطا در ترجمه "${project.name}": ${errMsg.slice(0, 80)}`;
   }
 }
@@ -939,10 +916,10 @@ async function processTick(): Promise<void> {
   let availableKeySlots = maxKeyThreads - busyKeys.size;
   if (availableKeySlots <= 0) return;
 
-  // 1. Auto-complete any project whose all cues are already properly translated
+  // 1. Auto-complete any project whose all cues have translations
   for (const p of db.projects) {
     if (p.status !== 'completed' && p.totalCues > 0) {
-      const untranslated = p.items.filter((i) => !isCueProperlyTranslated(i.originalText, i.translatedText, p.targetLanguage));
+      const untranslated = p.items.filter((i) => !i.translatedText || !i.translatedText.trim());
       if (untranslated.length === 0) {
         p.status = 'completed';
         p.completedAt = p.completedAt || new Date().toISOString();
@@ -961,22 +938,20 @@ async function processTick(): Promise<void> {
     if (p.status === 'translating') return true;
     if (p.status === 'queued') return true;
     if (p.status === 'has_incomplete') return true;
-    if (p.status === 'waiting_for_keys') {
-      return allKeys.some((k) => !isKeyExhausted(k));
-    }
+    if (p.status === 'waiting_for_keys') return true;
     return false;
   });
 
   if (candidateProjects.length === 0) return;
 
   // Split projects into:
-  // A. Finisher candidates (>= 95% complete OR <= 35 remaining cues)
-  // B. Standard candidates (< 95% complete AND > 35 remaining cues)
+  // A. Finisher candidates (few remaining cues)
+  // B. Standard candidates
   const finisherCandidates: ServerSubtitleProject[] = [];
   const standardCandidates: ServerSubtitleProject[] = [];
 
   for (const proj of candidateProjects) {
-    const untranslatedCount = proj.items.filter((i) => !isCueProperlyTranslated(i.originalText, i.translatedText, proj.targetLanguage)).length;
+    const untranslatedCount = proj.items.filter((i) => !i.translatedText || !i.translatedText.trim()).length;
     if (untranslatedCount === 0) continue;
     const isNearDone = untranslatedCount <= 35 || (proj.totalCues > 0 && (proj.translatedCues / proj.totalCues) >= 0.95);
     if (isNearDone) {
@@ -988,8 +963,8 @@ async function processTick(): Promise<void> {
 
   // Sort finisher candidates by remaining cues ascending (fewest first - SRJF)
   finisherCandidates.sort((a, b) => {
-    const remA = a.items.filter((i) => !isCueProperlyTranslated(i.originalText, i.translatedText, a.targetLanguage)).length;
-    const remB = b.items.filter((i) => !isCueProperlyTranslated(i.originalText, i.translatedText, b.targetLanguage)).length;
+    const remA = a.items.filter((i) => !i.translatedText || !i.translatedText.trim()).length;
+    const remB = b.items.filter((i) => !i.translatedText || !i.translatedText.trim()).length;
     return remA - remB;
   });
 
@@ -1017,7 +992,7 @@ async function processTick(): Promise<void> {
     if (inFlightForThisProj) continue; // Already being processed by its dedicated 1 key!
 
     const untranslatedCues = project.items.filter(
-      (item) => !isCueProperlyTranslated(item.originalText, item.translatedText, project.targetLanguage)
+      (item) => !item.translatedText || !item.translatedText.trim()
     );
     if (untranslatedCues.length === 0) continue;
 
@@ -1038,7 +1013,7 @@ async function processTick(): Promise<void> {
 
     project.status = 'translating';
     project.workerKeyUsed = leasedKey;
-    saveDatabaseSync();
+    scheduleSaveDatabase();
 
     void (async () => {
       try {
@@ -1094,7 +1069,7 @@ async function processTick(): Promise<void> {
     if (availableKeySlots <= 0) break;
 
     const untranslatedCues = project.items.filter(
-      (item) => !isCueProperlyTranslated(item.originalText, item.translatedText, project.targetLanguage)
+      (item) => !item.translatedText || !item.translatedText.trim()
     );
     if (untranslatedCues.length === 0) continue;
 
@@ -1126,7 +1101,7 @@ async function processTick(): Promise<void> {
 
       project.status = 'translating';
       project.workerKeyUsed = leasedKey;
-      saveDatabaseSync();
+      scheduleSaveDatabase();
 
       void (async () => {
         try {

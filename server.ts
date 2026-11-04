@@ -2444,7 +2444,7 @@ app.get('/api/folders/:folderId/export/vtt', async (req, res) => {
       zip.file(outName, vttContent);
     }
 
-    const zipBuffer = await zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' });
+    const zipBuffer = await zip.generateAsync({ type: 'nodebuffer', compression: 'STORE' });
     const safeAsciiName = `folder_${folder.id}_VTT.zip`;
     const encodedName = encodeURIComponent(`${folder.name}_VTT.zip`);
     res.setHeader('Content-Type', 'application/zip');
@@ -2477,7 +2477,7 @@ app.get('/api/folders/:folderId/export/srt', async (req, res) => {
       zip.file(outName, srtContent);
     }
 
-    const zipBuffer = await zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' });
+    const zipBuffer = await zip.generateAsync({ type: 'nodebuffer', compression: 'STORE' });
     const safeAsciiName = `folder_${folder.id}_SRT.zip`;
     const encodedName = encodeURIComponent(`${folder.name}_SRT.zip`);
     res.setHeader('Content-Type', 'application/zip');
@@ -3001,8 +3001,8 @@ app.get('/api/server/info', (req, res) => {
   try {
     return res.json({
       success: true,
-      model: 'Gemini 3.5 Flash Lite (مدل اصلی) / Gemini 3.1 Flash Lite (رزرو ۵۰۳)',
-      modelId: 'gemini-3.5-flash-lite',
+      model: 'Gemini 3.1 Flash Lite (مدل فوق‌سریع اصلی) / Gemini Flash Latest (رزرو ۵۰۳)',
+      modelId: 'gemini-3.1-flash-lite',
       databasePath: getDatabaseFilePath(),
       vpsReady: true,
       port: PORT,
