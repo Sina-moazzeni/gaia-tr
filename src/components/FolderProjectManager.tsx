@@ -1348,63 +1348,63 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
     <div className="w-full flex flex-col gap-6 animate-fade-in">
       
       {/* Autonomous Background Banner */}
-      <div className="w-full bg-gradient-to-r from-indigo-950/80 via-slate-900 to-indigo-950/80 border border-indigo-500/30 rounded-2xl p-4 lg:p-5 shadow-xl shadow-indigo-950/20 backdrop-blur-md flex flex-col xl:flex-row items-start xl:items-center justify-between gap-4">
-        <div className="flex items-center gap-3.5">
-          <div className="w-11 h-11 rounded-xl bg-gradient-to-tr from-indigo-600 to-violet-500 flex items-center justify-center text-white shadow-md shadow-indigo-500/30 shrink-0">
-            <Server className="w-6 h-6 animate-pulse" />
-          </div>
-          <div>
-            <div className="flex items-center gap-2.5 flex-wrap">
-              <h2 className="text-base font-bold text-white flex items-center gap-2">
-                <span>موتور دیتابیس و ترجمه مستقل در پس‌زمینه سرور</span>
-                <span className="text-xs font-mono font-bold px-2.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/40">
-                  مدل اختصاصی: Gemini 3.5 Flash Lite
+      <div className="w-full bg-gradient-to-br from-indigo-950/90 via-slate-900/95 to-slate-950 border border-indigo-500/30 rounded-2xl p-4 sm:p-5 shadow-xl shadow-indigo-950/20 backdrop-blur-md flex flex-col gap-4 overflow-hidden">
+        {/* Top Header Row: Icon, Title & Status Badges */}
+        <div className="flex flex-col md:flex-row md:items-center justify-between gap-3">
+          <div className="flex items-start sm:items-center gap-3 min-w-0">
+            <div className="w-10 h-10 sm:w-11 sm:h-11 rounded-xl bg-gradient-to-tr from-indigo-600 to-violet-500 flex items-center justify-center text-white shadow-md shadow-indigo-500/30 shrink-0 mt-0.5 sm:mt-0">
+              <Server className="w-5 h-5 sm:w-6 sm:h-6 animate-pulse" />
+            </div>
+            <div className="flex flex-col gap-1 min-w-0">
+              <div className="flex items-center gap-2 flex-wrap">
+                <h2 className="text-sm sm:text-base font-bold text-white">
+                  موتور دیتابیس و ترجمه مستقل در پس‌زمینه سرور
+                </h2>
+                <span className="text-[11px] font-mono font-bold px-2.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/40">
+                  Gemini 3.5 Flash Lite
                 </span>
                 <span className="text-[11px] font-mono px-2 py-0.5 rounded-full bg-slate-800 text-slate-300 border border-slate-700 flex items-center gap-1">
                   <Database className="w-3 h-3 text-cyan-400" />
-                  <span>دیسک سرور: {serverInfo?.databasePath || 'data/subtitles_db.json'}</span>
+                  <span className="truncate max-w-[200px] sm:max-w-xs">{serverInfo?.databasePath || 'data/subtitles_db.json'}</span>
                 </span>
-              </h2>
+              </div>
+              <p className="text-xs text-slate-300 leading-relaxed">
+                ترجمه کاملاً خودکار روی سرور مجازی (VPS) اجرا می‌شود و با بستن مرورگر متوقف نمی‌شود. موازی‌سازی با کلیدهای مجزا، کنترل دقیق نرخ و حفظ ۱۰۰٪ سطرها فعال است.
+              </p>
             </div>
-            <p className="text-xs text-slate-300 mt-1.5 leading-relaxed">
-              ترجمه کاملاً خودکار روی سرور مجازی (VPS) یا هاست اختصاصی اجرا می‌شود. با بسته شدن مرورگر روند ترجمه متوقف <span className="text-emerald-400 font-bold">نمی‌شود</span>.
-              ترجمه موازی با تخصیص کلیدهای مجزا، کنترل دقیق نرخ درخواست‌ها (RPM) و نگهداری ۱۰۰٪ سطرهای قبلی پیاده‌سازی شده است.
-            </p>
           </div>
         </div>
 
-        {/* Action Controls: Stop All, Resume All, Server Config, Backup, Restore, Key Management */}
-        <div className="flex items-center gap-2 shrink-0 w-full xl:w-auto justify-end flex-wrap">
-          {/* Emergency Stop All Button */}
+        {/* Action Controls Toolbar - Fully Contained, Grouped & Wrapped so it never overflows */}
+        <div className="w-full pt-3.5 border-t border-slate-800/80 flex flex-wrap items-center justify-start gap-2">
+          {/* Action Group 1: Translation Execution */}
           <button
             type="button"
             onClick={handleStopAllTranslations}
             disabled={isStoppingAll}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold bg-rose-600/30 text-rose-300 hover:bg-rose-600/40 border border-rose-500/50 shadow-md shadow-rose-950/30 transition-all cursor-pointer"
-            title="توقف اضطراری کل عملیات ترجمه در تمامی پوشه‌ها و فایل‌ها (سطرهای ترجمه‌شده قبلی ۱۰۰٪ حفظ می‌شوند)"
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold bg-rose-600/25 text-rose-300 hover:bg-rose-600/35 border border-rose-500/40 shadow-xs transition-all cursor-pointer"
+            title="توقف اضطراری کل عملیات ترجمه در تمامی پوشه‌ها و فایل‌ها (سطرهای قبلی ۱۰۰٪ حفظ می‌شوند)"
           >
             {isStoppingAll ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <StopCircle className="w-3.5 h-3.5 text-rose-400" />}
-            <span>توقف کل عملیات ترجمه</span>
+            <span>توقف ترجمه‌ها</span>
           </button>
 
-          {/* Resume All Button */}
           <button
             type="button"
             onClick={handleResumeAllTranslations}
             disabled={isResumingAll}
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold bg-emerald-600/25 text-emerald-300 hover:bg-emerald-600/35 border border-emerald-500/40 shadow-xs transition-all cursor-pointer"
-            title="ادامه ترجمه تمام فایل‌های متوقف‌شده یا ناقص در صف سرور"
+            title="ادامه ترجمه تمام فایل‌های متوقف‌شده یا در انتظار در صف سرور"
           >
             {isResumingAll ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Play className="w-3.5 h-3.5 text-emerald-400 fill-current" />}
             <span>ادامه کل فایل‌ها</span>
           </button>
 
-          {/* Turbo Complete Incomplete Files Button */}
           <button
             type="button"
             onClick={handleTurboComplete}
             disabled={isTurboCompleting}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold bg-amber-500/20 text-amber-300 hover:bg-amber-500/30 border border-amber-500/40 shadow-md shadow-amber-950/20 transition-all cursor-pointer"
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold bg-amber-500/25 text-amber-300 hover:bg-amber-500/35 border border-amber-500/40 shadow-xs transition-all cursor-pointer"
             title="تکمیل فوری و اولویت‌دار فایل‌های ناقص (۹۸٪ به بالا) بدون معطلی و با رفع خودکار افکت‌های صوتی"
           >
             {isTurboCompleting ? (
@@ -1412,51 +1412,37 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
             ) : (
               <Sparkles className="w-3.5 h-3.5 text-amber-400" />
             )}
-            <span>⚡ تکمیل فوری سطرها (توربو ۱۰۰٪)</span>
+            <span>⚡ تکمیل فوری سطرها (توربو)</span>
           </button>
 
-          {/* Server Settings Button */}
-          <button
-            type="button"
-            onClick={() => {
-              fetchServerConfig();
-              setIsServerConfigOpen(true);
-            }}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold bg-slate-800/80 text-violet-300 hover:bg-slate-800 border border-violet-500/30 transition-colors shadow-xs"
-            title="تنظیمات دامنه مجاز (ALLOWED_ORIGIN)، پراکسی جمینای (GEMINI_BASE_URL) و تعداد ترجمه همزمان"
-          >
-            <Settings className="w-3.5 h-3.5 text-violet-400" />
-            <span>تنظیمات سرور و پراکسی</span>
-          </button>
+          <span className="hidden sm:inline-block w-px h-5 bg-slate-800 mx-0.5" />
 
-          {/* Backup Button */}
+          {/* Action Group 2: Database & Audit */}
           <button
             type="button"
             onClick={handleDownloadBackup}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold bg-slate-800/80 text-cyan-300 hover:bg-slate-800 border border-cyan-500/30 transition-colors shadow-xs"
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold bg-slate-800/80 text-cyan-300 hover:bg-slate-800 hover:text-cyan-200 border border-cyan-500/30 transition-colors shadow-xs cursor-pointer"
             title="دانلود فایل پشتیبان کامل دیتابیس سرور شامل تمام پروژه‌ها و زیرنویس‌ها"
           >
             <Download className="w-3.5 h-3.5 text-cyan-400" />
             <span>پشتیبان‌گیری (Backup)</span>
           </button>
 
-          {/* Restore Button */}
           <button
             type="button"
             onClick={() => setIsRestoreModalOpen(true)}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold bg-slate-800/80 text-amber-300 hover:bg-slate-800 border border-amber-500/30 transition-colors shadow-xs"
-            title="بازیابی کل دیتابیس از فایل JSON پشتیبان"
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold bg-slate-800/80 text-amber-300 hover:bg-slate-800 hover:text-amber-200 border border-amber-500/30 transition-colors shadow-xs cursor-pointer"
+            title="بازیابی کل دیتابیس از فایل JSON پشتیبان (با پشتیبانی از فایل‌های سنگین)"
           >
             <UploadCloud className="w-3.5 h-3.5 text-amber-400" />
             <span>بازیابی (Restore)</span>
           </button>
 
-          {/* Audit English Lines Button */}
           <button
             type="button"
             onClick={handleAuditAndFixEnglish}
             disabled={isAuditing}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold bg-emerald-500/20 text-emerald-300 hover:bg-emerald-500/30 border border-emerald-500/30 transition-colors shadow-xs"
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold bg-emerald-500/15 text-emerald-300 hover:bg-emerald-500/25 border border-emerald-500/30 transition-colors shadow-xs cursor-pointer"
             title="بررسی دقیق تمام زیرنویس‌ها برای یافتن هرگونه سطر انگلیسی باقی‌مانده و ترجمه مجدد ۱۰۰٪ فارسی آن‌ها"
           >
             {isAuditing ? (
@@ -1464,21 +1450,36 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
             ) : (
               <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
             )}
-            <span>پاکسازی و رفع سطور انگلیسی</span>
+            <span>رفع سطور انگلیسی</span>
           </button>
 
-          {/* Key Pool & Test Button */}
+          <span className="hidden sm:inline-block w-px h-5 bg-slate-800 mx-0.5" />
+
+          {/* Action Group 3: Server & Key Management */}
           <button
             type="button"
             onClick={() => {
               fetchServerKeys();
               setIsKeysModalOpen(true);
             }}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold bg-indigo-500/20 text-indigo-300 hover:bg-indigo-500/30 border border-indigo-500/30 transition-colors shadow-xs"
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold bg-indigo-500/20 text-indigo-300 hover:bg-indigo-500/30 border border-indigo-500/30 transition-colors shadow-xs cursor-pointer"
             title="مدیریت، چرخش خودکار و تست کلیدهای API از روی سرور"
           >
             <Key className="w-3.5 h-3.5 text-amber-400" />
             <span>استخر کلیدها ({serverKeysCount} فعال)</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => {
+              fetchServerConfig();
+              setIsServerConfigOpen(true);
+            }}
+            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold bg-slate-800/80 text-violet-300 hover:bg-slate-800 hover:text-violet-200 border border-violet-500/30 transition-colors shadow-xs cursor-pointer"
+            title="تنظیمات دامنه مجاز (ALLOWED_ORIGIN)، پراکسی جمینای (GEMINI_BASE_URL) و تعداد ترجمه همزمان"
+          >
+            <Settings className="w-3.5 h-3.5 text-violet-400" />
+            <span>تنظیمات سرور</span>
           </button>
         </div>
       </div>
