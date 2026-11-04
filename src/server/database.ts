@@ -93,8 +93,9 @@ function ensureDataDir() {
 const DEFAULT_SERVER_CONFIG: ServerConfig = {
   allowedOrigin: process.env.ALLOWED_ORIGIN?.trim() || '*',
   geminiBaseUrl: process.env.GEMINI_BASE_URL?.trim() || 'https://generativelanguage.googleapis.com',
-  maxConcurrentProjects: Number(process.env.MAX_CONCURRENT_PROJECTS) || 8,
+  maxConcurrentProjects: Number(process.env.MAX_CONCURRENT_PROJECTS) || 4,
   maxTotalParallelKeys: Number(process.env.MAX_PARALLEL_KEYS) || 19,
+  maxKeysPerProject: 1, // Strictly 1 dedicated key per file
 };
 
 function loadDatabaseFromDisk(): SubtitlesDatabase {
@@ -592,11 +593,55 @@ export interface ServerKeyDetail {
   maskedKey: string;
   isExhausted: boolean;
   cooldownRemainingSec: number;
+  isDisabled: boolean;
+  disabledReason?: string;
   requestsCount: number;
   promptTokens: number;
   candidatesTokens: number;
   totalTokens: number;
   lastUsedAt?: string;
+}
+
+// ─── Permanently Disabled / Deleted Keys (401, Deleted Service Account) ──────
+export const disabledKeysMap = new Map<string, { timestamp: number; reason: string }>();
+
+export function markKeyAsDisabled(key: string, reason: string = 'Service account deleted or disabled (401)'): void {
+  disabledKeysMap.set(key, { timestamp: Date.now(), reason });
+  console.warn(`[KeyPool] PERMANENTLY DISABLED KEY ${key.slice(0, 6)}...: ${reason}`);
+
+  // Automatically remove this dead key from db.serverKeys so it never interferes again
+  try {
+    const db = getDatabase();
+    if (Array.isArray(db.serverKeys) && db.serverKeys.includes(key)) {
+      db.serverKeys = db.serverKeys.filter((k) => k !== key);
+      if (db.activeKeyIndex >= db.serverKeys.length) {
+        db.activeKeyIndex = 0;
+      }
+      saveDatabaseSync();
+    }
+  } catch (err) {
+    console.error('[KeyPool] Error removing disabled key from db:', err);
+  }
+}
+
+export function isKeyDisabled(key: string): boolean {
+  return disabledKeysMap.has(key);
+}
+
+export function getDisabledKeysList(): Array<{ key: string; reason: string; timestamp: number }> {
+  return Array.from(disabledKeysMap.entries()).map(([k, v]) => ({
+    key: k,
+    reason: v.reason,
+    timestamp: v.timestamp,
+  }));
+}
+
+export function removeDisabledKey(key: string): void {
+  disabledKeysMap.delete(key);
+}
+
+export function clearAllDisabledKeys(): void {
+  disabledKeysMap.clear();
 }
 
 export function getServerKeysWithDetails(): ServerKeyDetail[] {
@@ -609,6 +654,10 @@ export function getServerKeysWithDetails(): ServerKeyDetail[] {
     const entry = exhaustedKeysMap.get(k);
     const isExhausted = entry ? (now - entry.timestamp <= KEY_EXHAUSTION_COOLDOWN_MS) : false;
     const cooldownRemainingSec = entry && isExhausted ? Math.max(0, Math.ceil((KEY_EXHAUSTION_COOLDOWN_MS - (now - entry.timestamp)) / 1000)) : 0;
+    const disabledEntry = disabledKeysMap.get(k);
+    const isDisabled = Boolean(disabledEntry);
+    const disabledReason = disabledEntry?.reason;
+
     const len = k.length;
     const maskedKey = len > 8 ? k.substring(0, 4) + '...' + k.substring(len - 4) : '****';
     const stats = keyStats[k] || { requestsCount: 0, promptTokens: 0, candidatesTokens: 0, totalTokens: 0 };
@@ -619,6 +668,8 @@ export function getServerKeysWithDetails(): ServerKeyDetail[] {
       maskedKey,
       isExhausted,
       cooldownRemainingSec,
+      isDisabled,
+      disabledReason,
       requestsCount: stats.requestsCount || 0,
       promptTokens: stats.promptTokens || 0,
       candidatesTokens: stats.candidatesTokens || 0,
@@ -668,6 +719,7 @@ export function markKeyAsExhausted(key: string, reason: string = 'Quota exhauste
 }
 
 export function isKeyExhausted(key: string): boolean {
+  if (isKeyDisabled(key)) return true;
   const entry = exhaustedKeysMap.get(key);
   if (!entry) return false;
   if (Date.now() - entry.timestamp > KEY_EXHAUSTION_COOLDOWN_MS) {
@@ -678,7 +730,7 @@ export function isKeyExhausted(key: string): boolean {
 }
 
 export function getExhaustedKeysList(): string[] {
-  return Array.from(exhaustedKeysMap.keys());
+  return Array.from(exhaustedKeysMap.keys()).filter((k) => !isKeyDisabled(k));
 }
 
 export function resetKeyCooldown(key: string): void {
@@ -722,21 +774,20 @@ export function resetKeyStats(): void {
 }
 
 /**
- * Lease an available, non-exhausted key from the pool.
+ * Lease an available, non-exhausted, non-disabled key from the pool.
  * If excludeKeys is provided, avoids choosing a key currently locked by another parallel worker.
  */
 export function leaseAvailableKey(excludeKeys: string[] = []): { key: string; index: number; total: number } | null {
-  const allKeys = getServerKeys();
+  const allKeys = getServerKeys().filter((k) => !isKeyDisabled(k));
   if (allKeys.length === 0) return null;
 
   const excludedSet = new Set(excludeKeys);
   const db = getDatabase();
 
-  // First pass: find first key in pool that is NOT exhausted and NOT currently busy (not in excludeKeys)
-  // Since exhausted keys are pushed to the end of allKeys, fresh and available keys are at the beginning!
+  // First pass: find first key in pool that is NOT exhausted, NOT disabled, and NOT currently busy
   for (let i = 0; i < allKeys.length; i++) {
     const candidateKey = allKeys[i];
-    if (!isKeyExhausted(candidateKey) && !excludedSet.has(candidateKey)) {
+    if (!isKeyDisabled(candidateKey) && !isKeyExhausted(candidateKey) && !excludedSet.has(candidateKey)) {
       db.activeKeyIndex = (i + 1) % allKeys.length;
       return { key: candidateKey, index: i, total: allKeys.length };
     }
@@ -745,13 +796,13 @@ export function leaseAvailableKey(excludeKeys: string[] = []): { key: string; in
   // Second pass: if all free keys are currently locked in flight, allow leasing another non-exhausted key
   for (let i = 0; i < allKeys.length; i++) {
     const candidateKey = allKeys[i];
-    if (!isKeyExhausted(candidateKey)) {
+    if (!isKeyDisabled(candidateKey) && !isKeyExhausted(candidateKey)) {
       db.activeKeyIndex = (i + 1) % allKeys.length;
       return { key: candidateKey, index: i, total: allKeys.length };
     }
   }
 
-  // All keys are exhausted
+  // All keys are exhausted or disabled
   return null;
 }
 
@@ -983,5 +1034,11 @@ export function retryDisruptedAndIncompleteProjects(folderId?: string): {
     retriedCount: retried.length,
     projectNames: retried,
   };
+}
+
+export function isIncompleteProject(p: ServerSubtitleProject): boolean {
+  if (!p || !p.items || p.items.length === 0) return false;
+  const untranslated = p.items.filter((i) => !i.translatedText || !i.translatedText.trim()).length;
+  return untranslated > 0;
 }
 

@@ -11,6 +11,8 @@ import {
   leaseAvailableKey,
   markKeyAsExhausted,
   isKeyExhausted,
+  markKeyAsDisabled,
+  isKeyDisabled,
   resetKeyCooldown,
   getExhaustedKeysList,
   saveDatabaseSync, 
@@ -263,8 +265,13 @@ export function getWorkerStatus(): WorkerStatus {
   const db = getDatabase();
   const config = getServerConfig();
 
+  // A project is actively translating in parallel IF AND ONLY IF it has cues currently in flight!
+  const activelyRunningProjectIds = new Set(
+    Array.from(inFlightCueKeys).map((k) => k.split('_')[0])
+  );
+
   const translatingProjects = db.projects.filter(
-    (p) => p.status === 'translating' || Array.from(inFlightCueKeys).some((k) => k.startsWith(p.id + '_'))
+    (p) => activelyRunningProjectIds.has(p.id)
   );
 
   const activeProjectsSummaries: ActiveProjectSummary[] = translatingProjects.map((p) => {
@@ -404,9 +411,18 @@ export async function testServerKey(apiKey: string): Promise<{
   const latencyMs = Date.now() - start;
   const msg = String(lastErr?.message || lastErr);
   let userMsg = `خطا در تست کلید: ${msg}`;
-  if (msg.includes('429') || msg.toLowerCase().includes('quota') || msg.toLowerCase().includes('resource_exhausted')) {
+  const isDeletedOrDisabled =
+    msg.includes('401') ||
+    msg.toLowerCase().includes('deleted or disabled') ||
+    msg.toLowerCase().includes('bound service account') ||
+    msg.toLowerCase().includes('service account is deleted');
+
+  if (isDeletedOrDisabled) {
+    markKeyAsDisabled(cleanKey, 'سرویس‌اکانت یا کلید در گوگل غیرفعال/حذف شده (401)');
+    userMsg = '❌ این کلید یا سرویس‌اکانت در گوگل غیرفعال یا حذف شده است (The bound service account is deleted or disabled) و به طور خودکار از استخر فعال خارج شد.';
+  } else if (msg.includes('429') || msg.toLowerCase().includes('quota') || msg.toLowerCase().includes('resource_exhausted')) {
     userMsg = 'سهمیه این کلید موقتاً به اتمام رسیده است (429 Quota Exhausted). سرور از کلید بعدی استفاده خواهد کرد.';
-  } else if (msg.includes('401') || msg.includes('403') || msg.toLowerCase().includes('invalid api key')) {
+  } else if (msg.includes('403') || msg.toLowerCase().includes('invalid api key')) {
     userMsg = 'کلید API نامعتبر است (Authentication / API Key Invalid). لطفاً از صحت کلید اطمینان حاصل فرمایید.';
   } else if (msg.includes('503') || msg.toLowerCase().includes('high demand')) {
     userMsg = 'سرورهای جمینای گوگل در حال حاضر با بار ترافیکی مقطعی روبرو هستند (503 High Demand). سیستم خودکار به مدل کمکی سوییچ خواهد کرد.';
@@ -633,24 +649,45 @@ export async function translateBatchWithDedicatedKey(
           continue;
         }
 
+        const isPermanentlyDisabledKey =
+          msg.includes('401') ||
+          msg.toLowerCase().includes('deleted or disabled') ||
+          msg.toLowerCase().includes('bound service account') ||
+          msg.toLowerCase().includes('service account is deleted') ||
+          msg.toLowerCase().includes('invalid api key') ||
+          msg.toLowerCase().includes('api_key_invalid') ||
+          msg.toLowerCase().includes('key not valid');
+
         const isRateLimit =
           msg.includes('429') ||
           msg.toLowerCase().includes('quota') ||
           msg.toLowerCase().includes('resource_exhausted') ||
-          msg.toLowerCase().includes('tokens');
+          msg.toLowerCase().includes('tokens') ||
+          msg.toLowerCase().includes('rate limit');
 
-        const isAuthError =
-          msg.includes('401') ||
+        const isOtherAuth =
           msg.includes('403') ||
-          msg.toLowerCase().includes('invalid api key') ||
-          msg.toLowerCase().includes('permission_denied');
+          msg.toLowerCase().includes('permission_denied') ||
+          msg.toLowerCase().includes('unauthorized');
 
-        if (isRateLimit || isAuthError) {
-          markKeyAsExhausted(currentKey, isRateLimit ? 'اتمام توکن/سهمیه (429)' : 'کلید نامعتبر');
+        if (isPermanentlyDisabledKey) {
+          markKeyAsDisabled(currentKey, 'سرویس‌اکانت یا کلید گوگل غیرفعال/حذف شده (401)');
+          console.error(`[BackgroundWorker] Key ${currentKey.slice(0, 6)}... is deleted/disabled by Google (401). Permanently removed from pool. Substituting fresh key immediately...`);
+          keyFailedWithRateOrAuth = true;
+          // Dynamically append any fresh keys that are not disabled or exhausted
+          const freshPoolKeys = getServerKeys().filter((k) => !isKeyDisabled(k) && !isKeyExhausted(k));
+          for (const fk of freshPoolKeys) {
+            if (!keysQueue.includes(fk)) {
+              keysQueue.push(fk);
+            }
+          }
+          break; // Break model loop to move to next key in keysQueue immediately
+        } else if (isRateLimit || isOtherAuth) {
+          markKeyAsExhausted(currentKey, isRateLimit ? 'اتمام توکن/سهمیه (429)' : 'عدم دسترسی (403)');
           console.warn(`[BackgroundWorker] Key ${currentKey.slice(0, 6)}... quota limit hit (429). Shifted to pool back. Substituting fresh key immediately...`);
           keyFailedWithRateOrAuth = true;
           // Dynamically append any fresh keys that were pushed to the front of pool
-          const freshPoolKeys = getServerKeys().filter((k) => !isKeyExhausted(k));
+          const freshPoolKeys = getServerKeys().filter((k) => !isKeyDisabled(k) && !isKeyExhausted(k));
           for (const fk of freshPoolKeys) {
             if (!keysQueue.includes(fk)) {
               keysQueue.push(fk);
@@ -915,30 +952,43 @@ async function processTick(): Promise<void> {
     return;
   }
 
-  // Concurrency is determined directly by maxConcurrentProjects and maxKeysPerProject
+  // Strict 1-Key-Per-File Concurrency Architecture:
+  // Every translating file uses strictly 1 dedicated leased key at a time.
+  // maxConcurrentProjects determines how many distinct files run in parallel (e.g. 10 files = 10 keys).
   const maxActiveFiles = Math.max(1, config.maxConcurrentProjects || 4);
-  const keysPerFile = Math.max(1, config.maxKeysPerProject || 2);
-  const totalMaxKeyThreads = Math.min(allKeys.length, maxActiveFiles * keysPerFile);
+  const activeAvailableKeys = allKeys.filter((k) => !isKeyDisabled(k) && !isKeyExhausted(k));
+  const totalMaxKeyThreads = Math.min(activeAvailableKeys.length, maxActiveFiles);
 
   // Check how many worker key slots are open
   let availableKeySlots = totalMaxKeyThreads - busyKeys.size;
-  if (availableKeySlots <= 0) return;
 
-  // 1. Auto-complete any project whose all cues have translations
+  // 1. Audit projects: Auto-complete files whose all cues have valid translations,
+  // and normalize status of waiting projects to 'queued' instead of lingering in 'translating'
+  const currentlyInFlightProjectIds = new Set(
+    Array.from(inFlightCueKeys).map((k) => k.split('_')[0])
+  );
+
   for (const p of db.projects) {
     if (p.totalCues > 0) {
       const untranslated = p.items.filter((i) => !i.translatedText || !i.translatedText.trim());
       if (untranslated.length === 0) {
-        p.status = 'completed';
-        p.completedAt = p.completedAt || new Date().toISOString();
+        if (p.status !== 'completed') {
+          p.status = 'completed';
+          p.completedAt = p.completedAt || new Date().toISOString();
+        }
         p.translatedCues = p.totalCues;
         p.failedCueIds = [];
         p.hasDisruption = false;
         p.lastError = undefined;
         p.errorMessage = undefined;
+      } else if (p.status === 'translating' && !currentlyInFlightProjectIds.has(p.id)) {
+        // If not actively executing a chunk in this moment, status is 'queued' so it doesn't falsely display as translating
+        p.status = 'queued';
       }
     }
   }
+
+  if (availableKeySlots <= 0) return;
 
   // 2. Candidate projects needing translation (must have untranslated cues and not paused)
   const candidateProjects = db.projects.filter((p) => {
@@ -949,15 +999,10 @@ async function processTick(): Promise<void> {
 
   if (candidateProjects.length === 0) return;
 
-  // Prioritize:
-  // 1. Projects already partially in flight
-  // 2. Projects with fewer remaining cues (SRJF: near-complete finish fast)
-  // 3. Queued and incomplete projects
+  // Prioritize candidates:
+  // 1. Projects already partially translated with fewer remaining cues (SRJF: finish incomplete files first!)
+  // 2. Queued projects
   candidateProjects.sort((a, b) => {
-    const inFlightA = Array.from(inFlightCueKeys).some((k) => k.startsWith(a.id + '_')) ? -1 : 0;
-    const inFlightB = Array.from(inFlightCueKeys).some((k) => k.startsWith(b.id + '_')) ? -1 : 0;
-    if (inFlightA !== inFlightB) return inFlightA - inFlightB;
-
     const remA = a.items.filter((i) => !i.translatedText || !i.translatedText.trim()).length;
     const remB = b.items.filter((i) => !i.translatedText || !i.translatedText.trim()).length;
     return remA - remB;
@@ -969,14 +1014,18 @@ async function processTick(): Promise<void> {
   );
 
   // Multi-File Simultaneous Concurrent Loop:
-  // Iterate across candidate files up to maxActiveFiles so they all translate concurrently!
+  // Dispatch up to maxActiveFiles so exactly the requested number of files run in parallel!
   for (const project of candidateProjects) {
     if (availableKeySlots <= 0) break;
 
-    const isAlreadyRunning = runningProjectIds.has(project.id);
-    if (!isAlreadyRunning && runningProjectIds.size >= maxActiveFiles) {
-      // Already running maximum concurrent files, skip to let them finish
+    // Strict 1 key per file: If this file already has a batch in flight, do NOT assign a second key!
+    if (runningProjectIds.has(project.id)) {
       continue;
+    }
+
+    // Strict concurrency limit: Do not start more files than maxActiveFiles
+    if (runningProjectIds.size >= maxActiveFiles) {
+      break;
     }
 
     const untranslatedCues = project.items.filter(
@@ -987,52 +1036,37 @@ async function processTick(): Promise<void> {
     const availableCues = untranslatedCues.filter((c) => !inFlightCueKeys.has(project.id + '_' + c.id));
     if (availableCues.length === 0) continue;
 
-    // Keys currently running in flight for this file:
-    const inFlightCount = Array.from(inFlightCueKeys).filter((k) => k.startsWith(project.id + '_')).length;
-    const inFlightBatches = Math.ceil(inFlightCount / BATCH_SIZE);
+    // Lease a dedicated key from the pool (excluding keys currently busy by other files)
+    const keyInfo = leaseAvailableKey(Array.from(busyKeys));
+    if (!keyInfo) break; // All remaining keys are either busy, exhausted, or disabled
 
-    // CRITICAL USER REQUIREMENT:
-    // "بعضی از فایل ها به آخر که نزدیک میشن کلید های اضافهی دگه نیاز ندارند کلید رو بزار برای فایل بعدی چون مثلا 20 سطر مانده و نمیشه 2 تا کلید همزمان فعال باشند"
-    // If <= 35 cues left (or <= 1 batch), strictly limit this file to 1 key!
-    // The second key is immediately freed for other waiting files in the queue!
-    const isNearEnd = untranslatedCues.length <= 35 || (project.totalCues > 0 && (project.translatedCues / project.totalCues) >= 0.95);
-    const configuredFileMax = project.maxKeys || keysPerFile;
-    const fileKeyLimit = isNearEnd ? 1 : Math.min(configuredFileMax, Math.ceil(availableCues.length / BATCH_SIZE));
+    const leasedKey = keyInfo.key;
+    busyKeys.add(leasedKey);
+    availableKeySlots--;
 
-    const keysToDispatch = Math.min(availableKeySlots, Math.max(0, fileKeyLimit - inFlightBatches));
-    if (keysToDispatch <= 0) continue; // Skip to next file so other files get keys!
+    // Single dedicated batch for this file (35 cues for near-end to finish promptly, or standard 50 cues)
+    const isNearEnd = untranslatedCues.length <= 35;
+    const chunkSize = isNearEnd ? Math.min(availableCues.length, 35) : BATCH_SIZE;
+    const chunkCues = availableCues.slice(0, chunkSize);
 
+    chunkCues.forEach((c) => inFlightCueKeys.add(project.id + '_' + c.id));
     runningProjectIds.add(project.id);
 
-    for (let d = 0; d < keysToDispatch && availableCues.length > 0 && availableKeySlots > 0; d++) {
-      const keyInfo = leaseAvailableKey(Array.from(busyKeys));
-      if (!keyInfo) break;
+    project.status = 'translating';
+    project.hasDisruption = false;
+    project.workerKeyUsed = leasedKey;
+    scheduleSaveDatabase();
 
-      const leasedKey = keyInfo.key;
-      busyKeys.add(leasedKey);
-      availableKeySlots--;
-
-      // If near end, take all remaining available cues in a single batch (e.g. 20 lines)
-      const chunkSize = isNearEnd ? Math.min(availableCues.length, 35) : BATCH_SIZE;
-      const chunkCues = availableCues.splice(0, chunkSize);
-      chunkCues.forEach((c) => inFlightCueKeys.add(project.id + '_' + c.id));
-
-      project.status = 'translating';
-      project.hasDisruption = false;
-      project.workerKeyUsed = leasedKey;
-      scheduleSaveDatabase();
-
-      void (async () => {
-        try {
-          await processProjectChunkBatch(project.id, chunkCues, leasedKey);
-        } catch (e) {
-          console.error(`[BackgroundWorker] Unexpected error in worker for ${project.id}:`, e);
-        } finally {
-          chunkCues.forEach((c) => inFlightCueKeys.delete(project.id + '_' + c.id));
-          busyKeys.delete(leasedKey);
-        }
-      })();
-    }
+    void (async () => {
+      try {
+        await processProjectChunkBatch(project.id, chunkCues, leasedKey);
+      } catch (e) {
+        console.error(`[BackgroundWorker] Unexpected error in worker for ${project.id}:`, e);
+      } finally {
+        chunkCues.forEach((c) => inFlightCueKeys.delete(project.id + '_' + c.id));
+        busyKeys.delete(leasedKey);
+      }
+    })();
   }
 }
 
