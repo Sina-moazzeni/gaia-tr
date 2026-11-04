@@ -823,7 +823,16 @@ export function auditAndFixEnglishCues(): { totalFixedCues: number; affectedProj
 
     project.translatedCues = realTranslatedCount;
 
-    if (realTranslatedCount < project.totalCues) {
+    if (realTranslatedCount >= project.totalCues && project.totalCues > 0) {
+      if (project.status !== 'completed') {
+        project.status = 'completed';
+        project.completedAt = project.completedAt || new Date().toISOString();
+        project.lastError = undefined;
+        project.errorMessage = undefined;
+        project.failedCueIds = [];
+        projectFixed = true;
+      }
+    } else if (realTranslatedCount < project.totalCues) {
       if (project.status === 'completed') {
         project.status = 'queued';
         project.completedAt = undefined;

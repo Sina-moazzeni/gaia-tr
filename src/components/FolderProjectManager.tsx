@@ -2187,7 +2187,7 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
                     const isQueued = proj.status === 'queued';
                     const isWaitingKeys = proj.status === 'waiting_for_keys';
                     const isIncomplete = proj.status === 'has_incomplete';
-                    const pct = proj.totalCues > 0 ? Math.round((proj.translatedCues / proj.totalCues) * 100) : 0;
+                    const pct = isComplete ? 100 : (proj.totalCues > 0 ? Math.min(99, Math.floor((proj.translatedCues / proj.totalCues) * 100)) : 0);
 
                     return (
                       <div
@@ -2430,8 +2430,8 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
                   return p.name.toLowerCase().includes(q) || (p.folderName && p.folderName.toLowerCase().includes(q));
                 })
                 .map((proj) => {
-                  const pct = proj.totalCues > 0 ? Math.round((proj.translatedCues / proj.totalCues) * 100) : 0;
                   const isComplete = proj.status === 'completed' || (proj.totalCues > 0 && proj.translatedCues >= proj.totalCues);
+                  const pct = isComplete ? 100 : (proj.totalCues > 0 ? Math.min(99, Math.floor((proj.translatedCues / proj.totalCues) * 100)) : 0);
                   const isTranslating = proj.status === 'translating';
 
                   return (

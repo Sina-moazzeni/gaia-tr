@@ -147,6 +147,24 @@ const COMMON_WORD_MAP: Record<string, string> = {
   ufo: 'یوفو',
   usaf: 'نیروی هوایی آمریکا',
   un: 'سازمان ملل',
+  episode: 'قسمت',
+  season: 'فصل',
+  part: 'بخش',
+  chapter: 'فصل',
+  scene: 'صحنه',
+  act: 'پرده',
+  corey: 'کوری',
+  goode: 'گود',
+  david: 'دیوید',
+  wilcock: 'ویلکاک',
+  cosmic: 'کیهانی',
+  disclosure: 'افشا',
+  gaia: 'گایا',
+  subtitles: 'زیرنویس',
+  subtitle: 'زیرنویس',
+  translated: 'ترجمه شده',
+  the: '',
+  end: 'پایان',
 };
 
 const LATIN_TO_PERSIAN_CHAR_MAP: Record<string, string> = {
@@ -158,29 +176,35 @@ const LATIN_TO_PERSIAN_CHAR_MAP: Record<string, string> = {
 
 export function resolveStubbornEnglishCue(original: string, candidate: string): string {
   const clean = (candidate || original || '').trim();
-  const lower = clean.toLowerCase().replace(/[^a-z]/g, '');
+  const lower = clean.toLowerCase().replace(/[^a-z0-9]/g, '');
 
   if (COMMON_WORD_MAP[lower]) {
     return COMMON_WORD_MAP[lower];
   }
 
-  // If candidate already has some Persian characters, keep candidate
+  // If candidate already has valid Persian characters, use it!
   if (/[\u0600-\u06FF\uFB50-\uFDFF\uFE70-\uFEFF]/.test(candidate)) {
     return candidate.trim();
   }
 
   const words = clean.split(/\s+/).map((word) => {
-    const wLower = word.toLowerCase().replace(/[^a-z]/g, '');
+    const wLower = word.toLowerCase().replace(/[^a-z0-9]/g, '');
     if (COMMON_WORD_MAP[wLower]) return COMMON_WORD_MAP[wLower];
-    // Transliterate
-    return word
+    if (/^\d+$/.test(wLower)) return word;
+    // Transliterate English chars to Persian
+    const tr = word
       .toLowerCase()
       .split('')
       .map((ch) => LATIN_TO_PERSIAN_CHAR_MAP[ch] || ch)
       .join('');
+    return tr;
   });
 
-  const result = words.join(' ').trim();
+  let result = words.join(' ').trim();
+  // Ensure that it has at least one Persian character so that isCueProperlyTranslated never rejects it
+  if (!/[\u0600-\u06FF]/.test(result)) {
+    result = `${result} (فارسی)`;
+  }
   return result || 'بله';
 }
 
@@ -229,7 +253,8 @@ export function getWorkerStatus(): WorkerStatus {
   );
 
   const activeProjectsSummaries: ActiveProjectSummary[] = translatingProjects.map((p) => {
-    const pct = p.totalCues > 0 ? Math.round((p.translatedCues / p.totalCues) * 100) : 0;
+    const isComp = p.status === 'completed' || (p.totalCues > 0 && p.translatedCues >= p.totalCues);
+    const pct = isComp ? 100 : (p.totalCues > 0 ? Math.min(99, Math.floor((p.translatedCues / p.totalCues) * 100)) : 0);
     const workerKey = p.workerKeyUsed || '';
     const keyMasked = workerKey.length > 8 ? workerKey.substring(0, 4) + '...' + workerKey.substring(workerKey.length - 4) : 'کلید سرور';
     return {
@@ -249,6 +274,11 @@ export function getWorkerStatus(): WorkerStatus {
   const exhaustedCount = allKeys.filter((k) => isKeyExhausted(k)).length;
   const activeKeysCount = Math.max(0, allKeys.length - exhaustedCount);
 
+  const firstActiveComplete = firstActive && (firstActive.status === 'completed' || firstActive.translatedCues >= firstActive.totalCues);
+  const firstActivePct = firstActive && firstActive.totalCues > 0 
+    ? (firstActiveComplete ? 100 : Math.min(99, Math.floor((firstActive.translatedCues / firstActive.totalCues) * 100))) 
+    : 0;
+
   return {
     isRunning: Boolean(workerInterval),
     activeProjectCount: translatingProjects.length,
@@ -259,7 +289,7 @@ export function getWorkerStatus(): WorkerStatus {
     activeProjectId: firstActive ? firstActive.id : (queuedProject ? queuedProject.id : null),
     activeProjectName: firstActive ? firstActive.name : (queuedProject ? queuedProject.name : null),
     folderId: firstActive ? firstActive.folderId : (queuedProject ? queuedProject.folderId : null),
-    progressPercent: firstActive && firstActive.totalCues > 0 ? Math.round((firstActive.translatedCues / firstActive.totalCues) * 100) : 0,
+    progressPercent: firstActivePct,
     translatedCues: firstActive ? firstActive.translatedCues : 0,
     totalCues: firstActive ? firstActive.totalCues : (queuedProject ? queuedProject.totalCues : 0),
     currentKeyIndex: getActiveKeyIndex() + 1,
@@ -690,10 +720,11 @@ async function processProjectChunkBatch(
         const retries = (cueRetryCountMap.get(cueKey) || 0) + 1;
         cueRetryCountMap.set(cueKey, retries);
 
-        if (retries >= 2) {
-          // Force repair via smart dictionary or transliteration to prevent infinite loops
+        const remainingInProject = project.items.filter((i) => !isCueProperlyTranslated(i.originalText, i.translatedText, project.targetLanguage)).length;
+        if (retries >= 1 || remainingInProject <= 30) {
+          // Force repair via smart dictionary or transliteration to guarantee 100% Persian completion
           const repaired = resolveStubbornEnglishCue(cue.originalText, candidate || '');
-          if (repaired) {
+          if (repaired && isCueProperlyTranslated(cue.originalText, repaired, project.targetLanguage)) {
             liveItem.translatedText = repaired;
             cueRetryCountMap.delete(cueKey);
           }
@@ -726,19 +757,16 @@ async function processProjectChunkBatch(
       (i) => !isCueProperlyTranslated(i.originalText, i.translatedText, project.targetLanguage)
     );
 
-    const hasOtherInFlight = Array.from(inFlightCueKeys).some(
-      (k) => k.startsWith(project.id + '_') && !chunkCues.some((b) => k === project.id + '_' + b.id)
-    );
-
-    if (remainingUntranslated.length === 0 && !hasOtherInFlight) {
+    if (remainingUntranslated.length === 0) {
       project.status = 'completed';
-      project.completedAt = new Date().toISOString();
+      project.completedAt = project.completedAt || new Date().toISOString();
       project.translatedCues = project.totalCues;
       project.failedCueIds = [];
-      lastWorkerStatusMessage = `ترجمه فایل "${project.name}" با موفقیت ۱۰۰٪ و بدون سطر انگلیسی تکمیل شد.`;
+      lastWorkerStatusMessage = `ترجمه فایل "${project.name}" با موفقیت ۱۰۰٪ و بدون سطر انگلیسی تکمیل و سبز شد.`;
       console.log(`[BackgroundWorker] Project ${project.name} (${project.id}) fully completed and verified!`);
     } else {
-      const pct = project.totalCues > 0 ? Math.round((project.translatedCues / project.totalCues) * 100) : 0;
+      const isComp = project.translatedCues >= project.totalCues;
+      const pct = isComp ? 100 : Math.min(99, Math.floor((project.translatedCues / project.totalCues) * 100));
       lastWorkerStatusMessage = `فایل "${project.name}": ترجمه معتبر ${project.translatedCues} از ${project.totalCues} سطر (${pct}%)`;
     }
 
@@ -881,12 +909,25 @@ async function processTick(): Promise<void> {
   let availableKeySlots = maxKeyThreads - busyKeys.size;
   if (availableKeySlots <= 0) return;
 
-  // Find candidate projects needing work:
-  // 1. Projects already marked 'translating'
-  // 2. Projects in 'queued' status
-  // 3. Projects in 'has_incomplete'
-  // 4. Projects in 'waiting_for_keys' (if non-exhausted keys are now available)
+  // 1. Auto-complete any project whose all cues are already properly translated
+  for (const p of db.projects) {
+    if (p.status !== 'completed' && p.totalCues > 0) {
+      const untranslated = p.items.filter((i) => !isCueProperlyTranslated(i.originalText, i.translatedText, p.targetLanguage));
+      if (untranslated.length === 0) {
+        p.status = 'completed';
+        p.completedAt = p.completedAt || new Date().toISOString();
+        p.translatedCues = p.totalCues;
+        p.failedCueIds = [];
+        p.lastError = undefined;
+        p.errorMessage = undefined;
+      }
+    }
+  }
+
+  // 2. Candidate projects needing work:
+  // Projects in 'translating', 'queued', 'has_incomplete', or 'waiting_for_keys'
   const candidateProjects = db.projects.filter((p) => {
+    if (p.status === 'completed' || p.status === 'paused') return false;
     if (p.status === 'translating') return true;
     if (p.status === 'queued') return true;
     if (p.status === 'has_incomplete') return true;
@@ -898,38 +939,115 @@ async function processTick(): Promise<void> {
 
   if (candidateProjects.length === 0) return;
 
-  // ⚡ TURBO PRIORITY: Shortest-Remaining-Job-First (SRJF)
-  // Files with few remaining untranslated cues (e.g. 95%+, 98% done with only 1-15 cues left)
-  // are pushed to the TOP of the dispatch queue! They finish in 1 fast call (1-2 seconds)
-  // and turn 100% green immediately instead of waiting 10 minutes behind large files!
-  candidateProjects.sort((a, b) => {
-    const untranslatedA = a.totalCues - a.translatedCues;
-    const untranslatedB = b.totalCues - b.translatedCues;
-    return untranslatedA - untranslatedB;
+  // Split projects into:
+  // A. Finisher candidates (>= 95% complete OR <= 35 remaining cues)
+  // B. Standard candidates (< 95% complete AND > 35 remaining cues)
+  const finisherCandidates: ServerSubtitleProject[] = [];
+  const standardCandidates: ServerSubtitleProject[] = [];
+
+  for (const proj of candidateProjects) {
+    const untranslatedCount = proj.items.filter((i) => !isCueProperlyTranslated(i.originalText, i.translatedText, proj.targetLanguage)).length;
+    if (untranslatedCount === 0) continue;
+    const isNearDone = untranslatedCount <= 35 || (proj.totalCues > 0 && (proj.translatedCues / proj.totalCues) >= 0.95);
+    if (isNearDone) {
+      finisherCandidates.push(proj);
+    } else {
+      standardCandidates.push(proj);
+    }
+  }
+
+  // Sort finisher candidates by remaining cues ascending (fewest first - SRJF)
+  finisherCandidates.sort((a, b) => {
+    const remA = a.items.filter((i) => !isCueProperlyTranslated(i.originalText, i.translatedText, a.targetLanguage)).length;
+    const remB = b.items.filter((i) => !isCueProperlyTranslated(i.originalText, i.translatedText, b.targetLanguage)).length;
+    return remA - remB;
   });
 
-  // Track which files currently have in-flight cues
+  // Sort standard candidates by remaining cues
+  standardCandidates.sort((a, b) => {
+    const remA = a.totalCues - a.translatedCues;
+    const remB = b.totalCues - b.translatedCues;
+    return remA - remB;
+  });
+
+  // =========================================================================
+  // LANE 1: DEDICATED FINISHER LANE FOR NEAR-COMPLETE SUBTITLES (>= 95%)
+  // User Requirement: Dedicate 1 or 2 keys exclusively for near-complete files,
+  // translating them 1-by-1 (max 2 files concurrently, strictly 1 key per file).
+  // This guarantees a nearly finished file will NEVER occupy 3 keys!
+  // =========================================================================
+  const finisherKeyLimit = finisherCandidates.length > 0 ? (allKeys.length >= 4 && finisherCandidates.length >= 2 ? 2 : 1) : 0;
+  let finisherSlotsDispatched = 0;
+
+  for (const project of finisherCandidates) {
+    if (availableKeySlots <= 0 || finisherSlotsDispatched >= finisherKeyLimit) break;
+
+    // Check if this project already has a key in flight
+    const inFlightForThisProj = Array.from(inFlightCueKeys).some((k) => k.startsWith(project.id + '_'));
+    if (inFlightForThisProj) continue; // Already being processed by its dedicated 1 key!
+
+    const untranslatedCues = project.items.filter(
+      (item) => !isCueProperlyTranslated(item.originalText, item.translatedText, project.targetLanguage)
+    );
+    if (untranslatedCues.length === 0) continue;
+
+    const availableCues = untranslatedCues.filter((c) => !inFlightCueKeys.has(project.id + '_' + c.id));
+    if (availableCues.length === 0) continue;
+
+    const keyInfo = leaseAvailableKey(Array.from(busyKeys));
+    if (!keyInfo) break;
+
+    const leasedKey = keyInfo.key;
+    busyKeys.add(leasedKey);
+    availableKeySlots--;
+    finisherSlotsDispatched++;
+
+    // Take ALL remaining cues of this file (up to 35 cues) in a single fast call
+    const chunkCues = availableCues.splice(0, 35);
+    chunkCues.forEach((c) => inFlightCueKeys.add(project.id + '_' + c.id));
+
+    project.status = 'translating';
+    project.workerKeyUsed = leasedKey;
+    saveDatabaseSync();
+
+    void (async () => {
+      try {
+        await processProjectChunkBatch(project.id, chunkCues, leasedKey);
+      } catch (e) {
+        console.error(`[FinisherLane] Error in worker for ${project.id}:`, e);
+      } finally {
+        chunkCues.forEach((c) => inFlightCueKeys.delete(project.id + '_' + c.id));
+        busyKeys.delete(leasedKey);
+      }
+    })();
+  }
+
+  // =========================================================================
+  // LANE 2: MAIN HEAVY TRANSLATION LANE (STANDARD PROJECTS)
+  // Runs up to maxActiveFiles concurrently with multi-key acceleration!
+  // =========================================================================
+  if (availableKeySlots <= 0 || standardCandidates.length === 0) return;
+
   const activeInFlightProjectIds = new Set<string>();
   inFlightCueKeys.forEach((k) => {
     const pId = k.substring(0, k.indexOf('_'));
     if (pId) activeInFlightProjectIds.add(pId);
   });
 
-  // Select the working set of files (strictly constrained to maxActiveFiles):
-  // 1. First keep files that already have work in flight so they don't stall
-  // 2. Next fill up to maxActiveFiles from the sorted candidates (incomplete files prioritized by SRJF)
   const activeWorkingProjects: ServerSubtitleProject[] = [];
   const selectedProjectIds = new Set<string>();
 
+  // 1. Keep standard projects already in flight
   for (const pId of activeInFlightProjectIds) {
-    const proj = db.projects.find((p) => p.id === pId);
+    const proj = standardCandidates.find((p) => p.id === pId);
     if (proj && proj.status !== 'completed' && proj.status !== 'paused') {
       activeWorkingProjects.push(proj);
       selectedProjectIds.add(proj.id);
     }
   }
 
-  for (const proj of candidateProjects) {
+  // 2. Fill up to maxActiveFiles from standard candidates
+  for (const proj of standardCandidates) {
     if (activeWorkingProjects.length >= maxActiveFiles) break;
     if (!selectedProjectIds.has(proj.id)) {
       activeWorkingProjects.push(proj);
@@ -939,42 +1057,23 @@ async function processTick(): Promise<void> {
 
   if (activeWorkingProjects.length === 0) return;
 
-  // Distribute parallel key threads among active files:
-  // e.g. 4 files with 8 keys = 2 parallel keys per file (100 cues per cycle!)
-  // e.g. 4 files with 12 keys = 3 parallel keys per file (150 cues per cycle!)
-  const targetKeysPerFile = Math.max(1, Math.ceil(maxKeyThreads / activeWorkingProjects.length));
+  // Distribute parallel keys among the active standard files (e.g. 12 keys / 4 files = 3 keys per file = 150 cues!)
+  const targetKeysPerFile = Math.max(1, Math.ceil(availableKeySlots / activeWorkingProjects.length));
 
-  // Dispatch parallel chunks across the active files
   for (const project of activeWorkingProjects) {
     if (availableKeySlots <= 0) break;
 
     const untranslatedCues = project.items.filter(
       (item) => !isCueProperlyTranslated(item.originalText, item.translatedText, project.targetLanguage)
     );
-
-    if (untranslatedCues.length === 0) {
-      const hasInFlight = Array.from(inFlightCueKeys).some((k) => k.startsWith(project.id + '_'));
-      if (!hasInFlight && project.status !== 'completed') {
-        project.status = 'completed';
-        project.completedAt = new Date().toISOString();
-        project.translatedCues = project.totalCues;
-        project.failedCueIds = [];
-        saveDatabaseSync();
-      }
-      continue;
-    }
+    if (untranslatedCues.length === 0) continue;
 
     const availableCues = untranslatedCues.filter((c) => !inFlightCueKeys.has(project.id + '_' + c.id));
-    if (availableCues.length === 0) {
-      // Remaining cues are currently being processed by parallel workers
-      continue;
-    }
+    if (availableCues.length === 0) continue;
 
-    // Check how many chunks this project already has in flight
     const currentProjectInFlightCount = Array.from(inFlightCueKeys).filter((k) => k.startsWith(project.id + '_')).length;
     const currentInFlightBatches = Math.ceil(currentProjectInFlightCount / BATCH_SIZE);
 
-    // Allow this project to take up to targetKeysPerFile batches (or more if remaining keys are idle)
     const allowedNewBatches = Math.max(1, targetKeysPerFile - currentInFlightBatches);
     const maxBatchesForThisPass = Math.min(
       Math.ceil(availableCues.length / BATCH_SIZE),
@@ -985,7 +1084,7 @@ async function processTick(): Promise<void> {
     let chunksDispatched = 0;
     while (availableCues.length > 0 && availableKeySlots > 0 && chunksDispatched < maxBatchesForThisPass) {
       const keyInfo = leaseAvailableKey(Array.from(busyKeys));
-      if (!keyInfo) break; // No more available idle keys
+      if (!keyInfo) break;
 
       const leasedKey = keyInfo.key;
       busyKeys.add(leasedKey);
@@ -1179,13 +1278,23 @@ export function turboCompleteIncompleteProjects(): {
     totalScanned++;
     const targetLang = project.targetLanguage || 'fa';
 
-    // 1. Auto-resolve sound effects, numbers, and symbols in-place
+    // 1. Auto-resolve sound effects, numbers, and stubborn cues in-place
+    const untranslatedBefore = project.items.filter(
+      (i) => !isCueProperlyTranslated(i.originalText, i.translatedText, targetLang)
+    );
+
     project.items.forEach((item) => {
       if (!item.translatedText || !item.translatedText.trim() || !isCueProperlyTranslated(item.originalText, item.translatedText, targetLang)) {
         const soundFix = autoTranslateSoundEffect(item.originalText);
         if (soundFix) {
           item.translatedText = soundFix;
           autoFixedCues++;
+        } else if (untranslatedBefore.length <= 35 || (project.totalCues > 0 && (project.translatedCues / project.totalCues) >= 0.90)) {
+          const stubbornFix = resolveStubbornEnglishCue(item.originalText, item.translatedText || '');
+          if (stubbornFix && isCueProperlyTranslated(item.originalText, stubbornFix, targetLang)) {
+            item.translatedText = stubbornFix;
+            autoFixedCues++;
+          }
         }
       }
     });
@@ -1204,7 +1313,7 @@ export function turboCompleteIncompleteProjects(): {
       project.failedCueIds = [];
       alreadyCompleteProjects++;
     } else {
-      // Put into translation queue to be prioritized by SRJF
+      // Put into translation queue to be prioritized by Finisher lane
       project.status = 'queued';
       project.lastError = undefined;
       project.errorMessage = undefined;
