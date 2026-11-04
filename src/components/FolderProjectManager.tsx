@@ -1754,10 +1754,161 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
               </div>
             </div>
 
+            {/* Live Active Online Translation Monitor: کدوم یکی در حال ترجمه است */}
+            {(() => {
+              const activeList = (workerStatus?.activeProjects && workerStatus.activeProjects.length > 0)
+                ? workerStatus.activeProjects
+                : (allProjects || []).filter((p) => p.status === 'translating' && p.totalCues > 0 && p.translatedCues < p.totalCues).map((p) => ({
+                    id: p.id,
+                    name: p.name,
+                    folderId: p.folderId,
+                    progressPercent: p.totalCues > 0 ? Math.floor((p.translatedCues / p.totalCues) * 100) : 0,
+                    translatedCues: p.translatedCues,
+                    totalCues: p.totalCues,
+                    keyMasked: p.workerKeyUsed ? p.workerKeyUsed.slice(0, 4) + '...' + p.workerKeyUsed.slice(-4) : 'کلید سرور',
+                  }));
+
+              return (
+                <div className={`rounded-2xl p-4 border transition-all flex flex-col gap-3 shadow-lg ${
+                  activeList.length > 0
+                    ? 'bg-slate-950/95 border-emerald-500/50 shadow-emerald-950/40 ring-1 ring-emerald-500/30'
+                    : 'bg-slate-950/70 border-slate-800'
+                }`}>
+                  <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2.5 pb-2.5 border-b border-slate-800/80">
+                    <div className="flex items-center gap-2.5 flex-wrap">
+                      {activeList.length > 0 ? (
+                        <span className="relative flex h-3.5 w-3.5">
+                          <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                          <span className="relative inline-flex rounded-full h-3.5 w-3.5 bg-emerald-500"></span>
+                        </span>
+                      ) : (
+                        <span className="h-3 w-3 rounded-full bg-slate-600 inline-block"></span>
+                      )}
+                      <span className="font-extrabold text-sm sm:text-base text-white">
+                        کدوم یکی در حال ترجمه است؟
+                      </span>
+                      <span className={`text-xs font-bold px-2.5 py-0.5 rounded-full ${
+                        activeList.length > 0
+                          ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
+                          : 'bg-slate-800 text-slate-400'
+                      }`}>
+                        {activeList.length > 0
+                          ? `🟢 هم‌اکنون ${activeList.length} فایل فعال`
+                          : 'هیچ فایلی فعال نیست'}
+                      </span>
+                    </div>
+
+                    <div className="flex items-center gap-2 text-xs font-mono">
+                      <span className="bg-emerald-950/90 text-emerald-300 px-3 py-1 rounded-lg border border-emerald-500/40 font-bold flex items-center gap-1.5">
+                        <Activity className="w-3.5 h-3.5 text-emerald-400" />
+                        <span>ترجمه آنلاین همزمان: {activeList.length} از {filesConcurrency} کلید</span>
+                      </span>
+                    </div>
+                  </div>
+
+                  {/* زیرش بنویس اون‌هایی که فعال هستند در حال ترجمه آنلاین */}
+                  <div className="flex flex-col gap-2.5">
+                    <div className="text-xs font-bold text-slate-300 flex items-center justify-between">
+                      <span className="flex items-center gap-1.5 text-emerald-400">
+                        <Sparkles className="w-3.5 h-3.5 text-emerald-400" />
+                        <span>فایل‌های فعال در حال ترجمه آنلاین (با پیشرفت لحظه‌ای):</span>
+                      </span>
+                      {activeList.length > 0 && (
+                        <span className="text-[11px] font-mono text-slate-400">
+                          هر فایل با ۱ کلید اختصاصی مجزا پردازش می‌شود
+                        </span>
+                      )}
+                    </div>
+
+                    {activeList.length === 0 ? (
+                      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 p-3.5 bg-slate-900/60 rounded-xl border border-slate-800/80 text-xs text-slate-400">
+                        <div className="flex items-center gap-2.5">
+                          <Clock className="w-4 h-4 text-slate-500 shrink-0" />
+                          <span>در حال حاضر هیچ فایلی به صورت آنلاین در حال ترجمه نیست.</span>
+                        </div>
+                        {folderIncompleteOrUntranslated.length > 0 && (
+                          <button
+                            type="button"
+                            onClick={() => handleRetryIncomplete(currentFolder?.id)}
+                            className="flex items-center gap-1.5 px-3.5 py-1.5 rounded-lg text-xs font-bold bg-amber-500 text-slate-950 hover:bg-amber-400 transition-colors cursor-pointer shadow-xs shrink-0"
+                          >
+                            <Play className="w-3.5 h-3.5 fill-current" />
+                            <span>شروع آنلاین ترجمه {folderIncompleteOrUntranslated.length} فایل این پوشه</span>
+                          </button>
+                        )}
+                      </div>
+                    ) : (
+                      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
+                        {activeList.map((ap) => {
+                          const folderObj = folders.find((f) => f.id === ap.folderId);
+                          const folderName = folderObj?.name || 'پوشه جاری';
+                          const remainingCues = Math.max(0, ap.totalCues - ap.translatedCues);
+
+                          return (
+                            <div
+                              key={ap.id}
+                              className="bg-slate-900/95 border-2 border-emerald-500/60 hover:border-emerald-400 rounded-xl p-3 flex flex-col gap-2.5 shadow-md shadow-emerald-950/20 relative overflow-hidden"
+                            >
+                              <div className="flex items-center justify-between gap-2">
+                                <div className="flex items-center gap-2 min-w-0">
+                                  <div className="w-7 h-7 rounded-lg bg-emerald-500/20 text-emerald-400 flex items-center justify-center shrink-0">
+                                    <Loader2 className="w-4 h-4 animate-spin text-emerald-400" />
+                                  </div>
+                                  <div className="flex flex-col min-w-0">
+                                    <span className="font-bold text-white text-xs truncate max-w-[170px] sm:max-w-[210px]" title={ap.name}>
+                                      {ap.name}
+                                    </span>
+                                    <span className="text-[10px] text-slate-400 font-mono truncate">
+                                      📁 {folderName}
+                                    </span>
+                                  </div>
+                                </div>
+
+                                <div className="flex items-center gap-1 shrink-0">
+                                  <span className="text-[10px] font-mono px-2 py-0.5 rounded-md bg-emerald-950 text-emerald-300 border border-emerald-500/40 font-bold">
+                                    {ap.keyMasked || 'کلید اختصاصی'}
+                                  </span>
+                                  <button
+                                    type="button"
+                                    onClick={() => handlePauseProject(ap.id, ap.name)}
+                                    className="p-1 rounded-md bg-amber-500/10 text-amber-300 hover:bg-amber-500/20 border border-amber-500/30 cursor-pointer"
+                                    title="توقف موقت این فایل"
+                                  >
+                                    <Pause className="w-3.5 h-3.5" />
+                                  </button>
+                                </div>
+                              </div>
+
+                              {/* Progress bar */}
+                              <div className="w-full bg-slate-950 rounded-full h-2 overflow-hidden border border-slate-800">
+                                <div
+                                  className="bg-gradient-to-r from-emerald-500 via-teal-400 to-amber-400 h-full rounded-full transition-all duration-300"
+                                  style={{ width: `${Math.max(5, ap.progressPercent)}%` }}
+                                />
+                              </div>
+
+                              <div className="flex items-center justify-between text-[10px] font-mono">
+                                <span className="text-emerald-300 font-bold">
+                                  سطر {ap.translatedCues} از {ap.totalCues} ({ap.progressPercent}%)
+                                </span>
+                                <span className="text-slate-400">
+                                  {remainingCues} سطر مانده
+                                </span>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              );
+            })()}
+
             {/* Clean File List of this Folder */}
             <div className="flex flex-col gap-2">
               <div className="flex items-center justify-between text-xs text-slate-400 px-1 font-semibold">
-                <span>لیست فایل‌های پوشه ({sortedDisplayProjects.length} فایل):</span>
+                <span>سایر فایل‌های این پوشه ({sortedDisplayProjects.length} فایل):</span>
                 <span>
                   {folderIncompleteOrUntranslated.length > 0 ? (
                     <span className="text-amber-400 font-bold">{folderIncompleteOrUntranslated.length} فایل نیازمند ترجمه</span>

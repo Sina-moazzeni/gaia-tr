@@ -278,7 +278,7 @@ export function getWorkerStatus(): WorkerStatus {
   );
 
   const translatingProjects = db.projects.filter(
-    (p) => activelyRunningProjectIds.has(p.id)
+    (p) => activelyRunningProjectIds.has(p.id) || (p.status === 'translating' && p.totalCues > 0 && p.translatedCues < p.totalCues)
   );
 
   const activeProjectsSummaries: ActiveProjectSummary[] = translatingProjects.map((p) => {
