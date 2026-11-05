@@ -1182,9 +1182,6 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
   // Global Emergency Stop: pause all translations across all folders immediately
   const [isStoppingAll, setIsStoppingAll] = useState(false);
   const handleStopAllTranslations = async () => {
-    if (!window.confirm('آیا می‌خواهید تمام عملیات ترجمه در سرور را متوقف کنید؟ (تمامی سطرهای ترجمه‌شده قبلی کاملاً محفوظ می‌مانند)')) {
-      return;
-    }
     setIsStoppingAll(true);
     try {
       const res = await fetch('/api/worker/pause-all', { method: 'POST' });
@@ -1194,6 +1191,7 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
         await fetchFolders();
         if (selectedFolderId) await fetchProjects(selectedFolderId);
         await fetchAllProjects();
+        await fetchWorkerStatus();
       } else {
         onShowToast(data.error || 'خطا در متوقف کردن ترجمه‌ها', 'error');
       }
@@ -1933,8 +1931,8 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
                 </div>
               </div>
 
-              {/* The ONLY Primary Action Button: "ترجمه فایل‌های ناقص یا ترجمه‌نشده" */}
-              <div className="flex items-center gap-2 shrink-0 self-start lg:self-center">
+              {/* Primary Action Buttons: "ترجمه فایل‌های ناقص" AND "🛑 توقف کامل تمام ترجمه‌ها" */}
+              <div className="flex items-center gap-2.5 shrink-0 self-start lg:self-center flex-wrap">
                 <button
                   type="button"
                   onClick={() => handleRetryIncomplete(currentFolder?.id)}
@@ -1944,7 +1942,7 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
                       ? 'bg-gradient-to-r from-amber-500 via-rose-500 to-amber-500 text-slate-950 hover:brightness-110 shadow-amber-500/30 ring-2 ring-amber-400/50 scale-[1.02]'
                       : 'bg-indigo-600/30 text-indigo-300 hover:bg-indigo-600/50 border border-indigo-500/40'
                   }`}
-                  title="شروع ترجمه فایل‌های ناقص یا ترجمه‌نشده این پوشه با اولویت اضطراری (اولویت ۱) و اختصاص ۶ کلید همزمان"
+                  title="شروع ترجمه فایل‌های ناقص یا ترجمه‌نشده این پوشه با اولویت بالا"
                 >
                   {isRetryingIncomplete ? (
                     <Loader2 className="w-4 h-4 animate-spin text-current" />
@@ -1957,6 +1955,21 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
                       {folderIncompleteOrUntranslated.length} فایل
                     </span>
                   )}
+                </button>
+
+                <button
+                  type="button"
+                  onClick={handleStopAllTranslations}
+                  disabled={isStoppingAll}
+                  className="flex items-center gap-2 px-4 py-2.5 rounded-xl font-bold text-xs bg-rose-600 hover:bg-rose-500 text-white shadow-lg shadow-rose-600/30 border border-rose-400/40 cursor-pointer transition-all"
+                  title="توقف فوری و کامل تمام ترجمه‌ها در تمامی پوشه‌ها و فایل‌ها (سطرهای ترجمه‌شده قبلی ۱۰۰٪ حفظ می‌شوند)"
+                >
+                  {isStoppingAll ? (
+                    <Loader2 className="w-4 h-4 animate-spin text-white" />
+                  ) : (
+                    <StopCircle className="w-4 h-4 text-white fill-current" />
+                  )}
+                  <span>🛑 توقف کامل تمام ترجمه‌ها</span>
                 </button>
               </div>
             </div>
@@ -1995,17 +2008,7 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
 
             {/* Live Active Online Translation Monitor: کدوم یکی در حال ترجمه است */}
             {(() => {
-              const activeList = (workerStatus?.activeProjects && workerStatus.activeProjects.length > 0)
-                ? workerStatus.activeProjects
-                : (allProjects || []).filter((p) => p.status === 'translating' && p.totalCues > 0 && p.translatedCues < p.totalCues).map((p) => ({
-                    id: p.id,
-                    name: p.name,
-                    folderId: p.folderId,
-                    progressPercent: p.totalCues > 0 ? Math.floor((p.translatedCues / p.totalCues) * 100) : 0,
-                    translatedCues: p.translatedCues,
-                    totalCues: p.totalCues,
-                    keyMasked: p.workerKeyUsed ? p.workerKeyUsed.slice(0, 4) + '...' + p.workerKeyUsed.slice(-4) : 'کلید سرور',
-                  }));
+              const activeList = workerStatus?.activeProjects || [];
 
               return (
                 <div className={`rounded-2xl p-4 border transition-all flex flex-col gap-3 shadow-lg ${
@@ -2166,24 +2169,27 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5 max-h-[360px] overflow-y-auto pr-1">
                   {sortedDisplayProjects.map((p) => {
                     const activeItem = workerStatus?.activeProjects?.find((ap) => ap.id === p.id);
-                    const isTranslating = p.status === 'translating' || Boolean(activeItem);
+                    const isTranslating = Boolean(activeItem);
                     const isCompleted = p.status === 'completed' || (p.totalCues > 0 && p.translatedCues >= p.totalCues);
+                    const isPaused = p.status === 'paused';
                     const pct = activeItem
                       ? activeItem.progressPercent
                       : (p.totalCues > 0 ? Math.floor((p.translatedCues / p.totalCues) * 100) : 0);
                     const transCues = activeItem ? activeItem.translatedCues : p.translatedCues;
                     const totCues = activeItem ? activeItem.totalCues : p.totalCues;
                     const remaining = Math.max(0, totCues - transCues);
-                    const keyMask = activeItem?.keyMasked || (p.workerKeyUsed ? p.workerKeyUsed.slice(0, 4) + '...' + p.workerKeyUsed.slice(-4) : null);
+                    const keyMask = activeItem?.keyMasked;
 
                     return (
                       <div
                         key={p.id}
                         className={`rounded-xl p-3 flex flex-col gap-2 border transition-all ${
                           isTranslating
-                            ? 'bg-slate-900 border-amber-500/50 shadow-md shadow-amber-500/10'
+                            ? 'bg-slate-900 border-amber-500/70 shadow-md shadow-amber-500/10 ring-1 ring-amber-500/30'
                             : isCompleted
                             ? 'bg-slate-950/80 border-emerald-500/25 hover:border-emerald-500/40'
+                            : isPaused
+                            ? 'bg-slate-950/60 border-slate-800 text-slate-400'
                             : Boolean(p.isPriority)
                             ? 'bg-slate-900 border-rose-500/40 shadow-xs'
                             : 'bg-slate-900/80 border-slate-800 hover:border-slate-700'
@@ -2195,10 +2201,12 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
                               <Loader2 className="w-4 h-4 animate-spin text-amber-400 shrink-0" />
                             ) : isCompleted ? (
                               <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+                            ) : isPaused ? (
+                              <Pause className="w-4 h-4 text-slate-500 shrink-0" />
                             ) : Boolean(p.isPriority) ? (
                               <Zap className="w-4 h-4 text-rose-400 shrink-0" />
                             ) : (
-                              <Clock className="w-4 h-4 text-slate-500 shrink-0" />
+                              <Clock className="w-4 h-4 text-indigo-400 shrink-0" />
                             )}
                             <span className="font-bold text-white text-xs truncate max-w-[200px] sm:max-w-[260px]" title={p.name}>
                               {p.name}
@@ -2213,20 +2221,24 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
                             )}
                             <span className={`text-[10px] font-mono px-2 py-0.5 rounded-md font-bold ${
                               isTranslating
-                                ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40'
+                                ? 'bg-amber-500/20 text-amber-300 border border-amber-500/40 animate-pulse'
                                 : isCompleted
                                 ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/40'
+                                : isPaused
+                                ? 'bg-slate-800 text-slate-400 border border-slate-700'
                                 : remaining > 0 && transCues > 0
-                                ? 'bg-rose-500/20 text-rose-300 border border-rose-500/40'
+                                ? 'bg-indigo-500/20 text-indigo-300 border border-indigo-500/40'
                                 : 'bg-slate-800 text-slate-400'
                             }`}>
                               {isTranslating
                                 ? `در حال ترجمه (${pct}%)`
                                 : isCompleted
                                 ? 'تکمیل شده (۱۰۰٪)'
+                                : isPaused
+                                ? `متوقف (${remaining} سطر مانده)`
                                 : remaining > 0 && transCues > 0
-                                ? `ناقص (${remaining} سطر مانده)`
-                                : 'ترجمه‌نشده'}
+                                ? `در صف سرور (${remaining} سطر مانده)`
+                                : 'در صف ترجمه'}
                             </span>
                           </div>
                         </div>
@@ -2258,22 +2270,12 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
                                 type="button"
                                 onClick={() => handlePauseProject(p.id, p.name)}
                                 className="flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-semibold bg-amber-500/15 text-amber-300 hover:bg-amber-500/25 border border-amber-500/30 cursor-pointer transition-colors"
-                                title="توقف موقت"
+                                title="توقف موقت ترجمه این فایل"
                               >
                                 <Pause className="w-3 h-3" />
                                 <span>توقف</span>
                               </button>
-                            ) : !isCompleted ? (
-                              <button
-                                type="button"
-                                onClick={() => handleStartProject(p.id, p.name)}
-                                className="flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-semibold bg-indigo-600 hover:bg-indigo-500 text-white cursor-pointer transition-colors shadow-xs"
-                                title="شروع ترجمه این فایل"
-                              >
-                                <Play className="w-3 h-3 fill-current" />
-                                <span>شروع</span>
-                              </button>
-                            ) : (
+                            ) : isCompleted ? (
                               <a
                                 href={`/api/projects/${p.id}/export/srt`}
                                 download
@@ -2283,6 +2285,26 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
                                 <Download className="w-3 h-3" />
                                 <span>SRT</span>
                               </a>
+                            ) : isPaused ? (
+                              <button
+                                type="button"
+                                onClick={() => handleResumeProject(p.id, p.name)}
+                                className="flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-semibold bg-emerald-600 hover:bg-emerald-500 text-white cursor-pointer transition-colors shadow-xs"
+                                title="ادامه ترجمه این فایل"
+                              >
+                                <Play className="w-3 h-3 fill-current" />
+                                <span>ادامه</span>
+                              </button>
+                            ) : (
+                              <button
+                                type="button"
+                                onClick={() => handlePauseProject(p.id, p.name)}
+                                className="flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-semibold bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 cursor-pointer transition-colors"
+                                title="خروج از صف و توقف"
+                              >
+                                <Pause className="w-3 h-3" />
+                                <span>توقف</span>
+                              </button>
                             )}
                           </div>
                         </div>
