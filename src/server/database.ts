@@ -65,6 +65,20 @@ export interface KeyUsageRecord {
   lastError?: string;
 }
 
+export interface FallbackAIConfig {
+  openaiKeys: string[];
+  openaiModel: string; // e.g. 'gpt-4o-mini'
+  claudeKeys: string[];
+  claudeModel: string; // e.g. 'claude-3-5-haiku-20241022'
+  customConfig?: {
+    baseUrl: string;
+    apiKey: string;
+    model: string;
+    name?: string;
+  };
+  providerStrategy: 'gemini_with_fallback' | 'gemini_only' | 'openai' | 'claude' | 'custom';
+}
+
 export interface SubtitlesDatabase {
   version: number;
   folders: ServerFolder[];
@@ -72,6 +86,7 @@ export interface SubtitlesDatabase {
   serverKeys: string[];
   activeKeyIndex: number;
   serverConfig?: ServerConfig;
+  fallbackAiConfig?: FallbackAIConfig;
   keyStats?: Record<string, KeyUsageRecord>;
   stats: {
     totalTranslations: number;
@@ -92,10 +107,24 @@ function ensureDataDir() {
   }
 }
 
+export const DEFAULT_FALLBACK_AI_CONFIG: FallbackAIConfig = {
+  openaiKeys: [],
+  openaiModel: 'gpt-4o-mini',
+  claudeKeys: [],
+  claudeModel: 'claude-3-5-haiku-20241022',
+  customConfig: {
+    baseUrl: '',
+    apiKey: '',
+    model: 'deepseek-chat',
+    name: 'سرویس سفارشی',
+  },
+  providerStrategy: 'gemini_with_fallback', // Gemini is primary, auto-fallback to OpenAI/Claude if Gemini daily quota runs out
+};
+
 const DEFAULT_SERVER_CONFIG: ServerConfig = {
   allowedOrigin: process.env.ALLOWED_ORIGIN?.trim() || '*',
   geminiBaseUrl: process.env.GEMINI_BASE_URL?.trim() || 'https://generativelanguage.googleapis.com',
-  maxConcurrentProjects: Number(process.env.MAX_CONCURRENT_PROJECTS) || 6,
+  maxConcurrentProjects: Number(process.env.MAX_CONCURRENT_PROJECTS) || 2,
   maxTotalParallelKeys: Number(process.env.MAX_PARALLEL_KEYS) || 19,
   maxKeysPerProject: 1, // Strictly 1 dedicated key per file
 };
@@ -469,16 +498,17 @@ export function getServerConfig(): ServerConfig {
     db.serverConfig = { ...DEFAULT_SERVER_CONFIG };
     saveDatabaseSync();
   }
-  // DYNAMICALLY ensure maxTotalParallelKeys utilizes all available keys (at least up to 19/32)
-  const idealParallelKeys = Math.max(16, allKeys.length);
-  if (!db.serverConfig.maxTotalParallelKeys || db.serverConfig.maxTotalParallelKeys < idealParallelKeys) {
-    db.serverConfig.maxTotalParallelKeys = Math.min(32, idealParallelKeys);
+  // Default to 2 concurrent projects if not set, allow any user-configured value between 1 and 24
+  if (!db.serverConfig.maxConcurrentProjects || db.serverConfig.maxConcurrentProjects < 1) {
+    db.serverConfig.maxConcurrentProjects = 2;
   }
-  if (!db.serverConfig.maxConcurrentProjects || db.serverConfig.maxConcurrentProjects < 8) {
-    db.serverConfig.maxConcurrentProjects = 8;
-  }
+  // Default to 1 key per project if not set
   if (!db.serverConfig.maxKeysPerProject || db.serverConfig.maxKeysPerProject < 1) {
-    db.serverConfig.maxKeysPerProject = 2;
+    db.serverConfig.maxKeysPerProject = 1;
+  }
+  const idealParallelKeys = Math.max(allKeys.length, db.serverConfig.maxConcurrentProjects);
+  if (!db.serverConfig.maxTotalParallelKeys || db.serverConfig.maxTotalParallelKeys < 1) {
+    db.serverConfig.maxTotalParallelKeys = Math.min(32, Math.max(4, idealParallelKeys));
   }
   return db.serverConfig;
 }
@@ -496,7 +526,7 @@ export function updateServerConfig(updates: Partial<ServerConfig>): ServerConfig
   }
   if (updates.maxConcurrentProjects !== undefined) {
     const val = Number(updates.maxConcurrentProjects);
-    db.serverConfig.maxConcurrentProjects = Math.max(1, Math.min(val || 4, 16));
+    db.serverConfig.maxConcurrentProjects = Math.max(1, Math.min(val || 2, 24));
   }
   if (updates.maxTotalParallelKeys !== undefined) {
     const val = Number(updates.maxTotalParallelKeys);
@@ -504,10 +534,67 @@ export function updateServerConfig(updates: Partial<ServerConfig>): ServerConfig
   }
   if (updates.maxKeysPerProject !== undefined) {
     const val = Number(updates.maxKeysPerProject);
-    db.serverConfig.maxKeysPerProject = Math.max(1, Math.min(val || 2, 8));
+    db.serverConfig.maxKeysPerProject = Math.max(1, Math.min(val || 1, 8));
   }
   saveDatabaseSync();
   return db.serverConfig;
+}
+
+// ─── Fallback AI Configuration (OpenAI, Claude, Custom) ──────────────────────
+
+export function getFallbackAIConfig(): FallbackAIConfig {
+  const db = getDatabase();
+  if (!db.fallbackAiConfig) {
+    db.fallbackAiConfig = { ...DEFAULT_FALLBACK_AI_CONFIG };
+    saveDatabaseSync();
+  }
+  return db.fallbackAiConfig;
+}
+
+export function updateFallbackAIConfig(updates: Partial<FallbackAIConfig>): FallbackAIConfig {
+  const db = getDatabase();
+  if (!db.fallbackAiConfig) {
+    db.fallbackAiConfig = { ...DEFAULT_FALLBACK_AI_CONFIG };
+  }
+  if (updates.openaiKeys !== undefined) {
+    db.fallbackAiConfig.openaiKeys = updates.openaiKeys.map((k) => k.trim()).filter(Boolean);
+  }
+  if (updates.openaiModel !== undefined) {
+    db.fallbackAiConfig.openaiModel = updates.openaiModel.trim() || 'gpt-4o-mini';
+  }
+  if (updates.claudeKeys !== undefined) {
+    db.fallbackAiConfig.claudeKeys = updates.claudeKeys.map((k) => k.trim()).filter(Boolean);
+  }
+  if (updates.claudeModel !== undefined) {
+    db.fallbackAiConfig.claudeModel = updates.claudeModel.trim() || 'claude-3-5-haiku-20241022';
+  }
+  if (updates.customConfig !== undefined) {
+    db.fallbackAiConfig.customConfig = {
+      baseUrl: updates.customConfig.baseUrl?.trim() || '',
+      apiKey: updates.customConfig.apiKey?.trim() || '',
+      model: updates.customConfig.model?.trim() || 'deepseek-chat',
+      name: updates.customConfig.name?.trim() || 'سرویس سفارشی',
+    };
+  }
+  if (updates.providerStrategy !== undefined) {
+    db.fallbackAiConfig.providerStrategy = updates.providerStrategy;
+  }
+  saveDatabaseSync();
+  return db.fallbackAiConfig;
+}
+
+export function setOpenAiKeys(keys: string[]): string[] {
+  const config = updateFallbackAIConfig({ openaiKeys: keys });
+  return config.openaiKeys;
+}
+
+export function setClaudeKeys(keys: string[]): string[] {
+  const config = updateFallbackAIConfig({ claudeKeys: keys });
+  return config.claudeKeys;
+}
+
+export function setCustomProviderConfig(cfg: { baseUrl: string; apiKey: string; model: string; name?: string }) {
+  return updateFallbackAIConfig({ customConfig: cfg });
 }
 
 // ─── Server Key Pool Operations ──────────────────────────────────────────────
