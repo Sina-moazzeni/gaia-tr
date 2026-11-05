@@ -244,9 +244,36 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
     maxKeysPerProject: 1,
   });
   const [isSavingConfig, setIsSavingConfig] = useState(false);
-  const [customConcurrentInput, setCustomConcurrentInput] = useState<string>('6');
+  const [customConcurrentInput, setCustomConcurrentInput] = useState<string>('2');
   const [fileFilter, setFileFilter] = useState<'all' | 'incomplete' | 'translating' | 'completed' | 'disrupted'>('all');
   const [activeQueueSubTab, setActiveQueueSubTab] = useState<'translating' | 'emergency' | 'untranslated' | 'completed'>('translating');
+
+  // Fallback AI Providers State (OpenAI, Claude, Custom)
+  const [keysModalTab, setKeysModalTab] = useState<'gemini' | 'fallback'>('gemini');
+  const [fallbackConfig, setFallbackConfig] = useState<{
+    openaiKeys: string[];
+    openaiModel: string;
+    claudeKeys: string[];
+    claudeModel: string;
+    customConfig?: { baseUrl: string; apiKey: string; model: string; name?: string };
+    providerStrategy: 'gemini_with_fallback' | 'gemini_only' | 'openai' | 'claude' | 'custom';
+  }>({
+    openaiKeys: [],
+    openaiModel: 'gpt-4o-mini',
+    claudeKeys: [],
+    claudeModel: 'claude-3-5-haiku-20241022',
+    customConfig: { baseUrl: '', apiKey: '', model: 'deepseek-chat', name: 'سرویس سفارشی' },
+    providerStrategy: 'gemini_with_fallback',
+  });
+  const [openaiKeysText, setOpenaiKeysText] = useState('');
+  const [claudeKeysText, setClaudeKeysText] = useState('');
+  const [customBaseUrl, setCustomBaseUrl] = useState('');
+  const [customApiKey, setCustomApiKey] = useState('');
+  const [customModel, setCustomModel] = useState('deepseek-chat');
+  const [customProviderName, setCustomProviderName] = useState('سرویس سفارشی');
+  const [isSavingFallback, setIsSavingFallback] = useState(false);
+  const [fallbackTestResult, setFallbackTestResult] = useState<any>(null);
+  const [isTestingFallback, setIsTestingFallback] = useState(false);
 
   // Server Info & Storage Location State
   const [serverInfo, setServerInfo] = useState<{
@@ -478,7 +505,27 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
       const data = await res.json();
       if (data.success && data.config) {
         setServerConfig(data.config);
-        setCustomConcurrentInput(String(data.config.maxConcurrentProjects || 4));
+        setCustomConcurrentInput(String(data.config.maxConcurrentProjects || 2));
+      }
+    } catch {}
+    void fetchFallbackConfig();
+  };
+
+  // Fetch Fallback Providers Config
+  const fetchFallbackConfig = async () => {
+    try {
+      const res = await fetch('/api/server/fallback-providers');
+      const data = await res.json();
+      if (data.success && data.config) {
+        setFallbackConfig(data.config);
+        setOpenaiKeysText((data.config.openaiKeys || []).join('\n'));
+        setClaudeKeysText((data.config.claudeKeys || []).join('\n'));
+        if (data.config.customConfig) {
+          setCustomBaseUrl(data.config.customConfig.baseUrl || '');
+          setCustomApiKey(data.config.customConfig.apiKey || '');
+          setCustomModel(data.config.customConfig.model || 'deepseek-chat');
+          setCustomProviderName(data.config.customConfig.name || 'سرویس سفارشی');
+        }
       }
     } catch {}
   };
@@ -1362,6 +1409,88 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
     }
   };
 
+  // Save Fallback AI Configuration (OpenAI, Claude, Custom)
+  const handleSaveFallbackConfig = async () => {
+    setIsSavingFallback(true);
+    try {
+      const payload = {
+        openaiKeys: openaiKeysText.split('\n').map((k) => k.trim()).filter(Boolean),
+        openaiModel: fallbackConfig.openaiModel || 'gpt-4o-mini',
+        claudeKeys: claudeKeysText.split('\n').map((k) => k.trim()).filter(Boolean),
+        claudeModel: fallbackConfig.claudeModel || 'claude-3-5-haiku-20241022',
+        customConfig: {
+          baseUrl: customBaseUrl.trim(),
+          apiKey: customApiKey.trim(),
+          model: customModel.trim() || 'deepseek-chat',
+          name: customProviderName.trim() || 'سرویس سفارشی',
+        },
+        providerStrategy: fallbackConfig.providerStrategy || 'gemini_with_fallback',
+      };
+      const res = await fetch('/api/server/fallback-providers', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload),
+      });
+      const data = await res.json();
+      if (data.success) {
+        setFallbackConfig(data.config);
+        onShowToast(data.message || 'تنظیمات هوش‌های پشتیبان ذخیره شد.', 'success');
+      } else {
+        onShowToast(data.error || 'خطا در ذخیره هوش‌های پشتیبان', 'error');
+      }
+    } catch {
+      onShowToast('خطا در ارتباط با سرور', 'error');
+    } finally {
+      setIsSavingFallback(false);
+    }
+  };
+
+  // Test Fallback Provider Key (OpenAI, Claude, Custom)
+  const handleTestFallbackKey = async (provider: 'openai' | 'claude' | 'custom') => {
+    setIsTestingFallback(true);
+    setFallbackTestResult(null);
+    try {
+      let key = '';
+      let baseUrl = '';
+      let model = '';
+      if (provider === 'openai') {
+        key = (openaiKeysText.split('\n').map((k) => k.trim()).filter(Boolean)[0]) || '';
+        model = fallbackConfig.openaiModel || 'gpt-4o-mini';
+      } else if (provider === 'claude') {
+        key = (claudeKeysText.split('\n').map((k) => k.trim()).filter(Boolean)[0]) || '';
+        model = fallbackConfig.claudeModel || 'claude-3-5-haiku-20241022';
+      } else {
+        key = customApiKey.trim();
+        baseUrl = customBaseUrl.trim();
+        model = customModel.trim() || 'deepseek-chat';
+      }
+
+      if (!key) {
+        onShowToast(`لطفاً ابتدا حداقل یک کلید برای ${provider === 'openai' ? 'OpenAI' : provider === 'claude' ? 'Claude' : 'سرویس سفارشی'} وارد کنید.`, 'error');
+        setIsTestingFallback(false);
+        return;
+      }
+
+      const res = await fetch('/api/server/fallback-providers/test', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ provider, key, baseUrl, model }),
+      });
+      const data = await res.json();
+      setFallbackTestResult(data);
+      if (data.success) {
+        onShowToast(data.message, 'success');
+      } else {
+        onShowToast(data.message || 'خطا در تست کلید', 'error');
+      }
+    } catch (err: any) {
+      setFallbackTestResult({ success: false, message: err?.message || 'خطای شبکه' });
+      onShowToast('خطا در تست اتصال', 'error');
+    } finally {
+      setIsTestingFallback(false);
+    }
+  };
+
   // Reset Cooldown for all keys
   const handleResetAllCooldowns = async () => {
     try {
@@ -1752,7 +1881,7 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
                 <div className="flex items-center gap-1.5 flex-wrap">
                   {[1, 2, 4, 6, 8, 10, 12].map((num) => {
                     const isSelected = filesConcurrency === num;
-                    const isDefault = num === 6;
+                    const isDefault = num === 2;
                     return (
                       <button
                         key={num}
@@ -1770,12 +1899,37 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
                           <span className={`absolute -top-2 -right-1 text-[9px] font-sans px-1 py-0.2 rounded-full font-extrabold ${
                             isSelected ? 'bg-amber-400 text-slate-950' : 'bg-indigo-950 text-amber-300 border border-amber-500/50'
                           }`}>
-                            پیش‌فرض
+                            توصیه
                           </span>
                         )}
                       </button>
                     );
                   })}
+
+                  {/* Manual Concurrency Input */}
+                  <div className="flex items-center gap-1.5 bg-slate-950/80 border border-slate-700/80 rounded-xl px-2 py-1">
+                    <span className="text-[11px] text-slate-400 font-medium">تعداد دلخواه:</span>
+                    <input
+                      type="number"
+                      min="1"
+                      max="24"
+                      value={customConcurrentInput}
+                      onChange={(e) => setCustomConcurrentInput(e.target.value)}
+                      placeholder="۲"
+                      className="w-12 bg-slate-900 border border-slate-700 rounded-lg px-1.5 py-0.5 text-xs text-amber-300 font-mono text-center focus:outline-none focus:border-indigo-500"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const val = parseInt(customConcurrentInput, 10);
+                        if (!isNaN(val) && val >= 1) handleSetDualConcurrency(val, 1);
+                      }}
+                      className="px-2.5 py-1 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-[11px] font-bold cursor-pointer transition-colors"
+                      title="تنظیم دقیق تعداد فایل‌های همزمان"
+                    >
+                      اعمال
+                    </button>
+                  </div>
                 </div>
               </div>
 
@@ -3920,6 +4074,43 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
               </button>
             </div>
 
+            {/* Modal Tabs */}
+            <div className="flex items-center gap-2 border-b border-slate-800 pb-3 flex-wrap">
+              <button
+                type="button"
+                onClick={() => setKeysModalTab('gemini')}
+                className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold transition-all cursor-pointer ${
+                  keysModalTab === 'gemini'
+                    ? 'bg-indigo-600 text-white shadow-md shadow-indigo-600/30 ring-1 ring-indigo-400'
+                    : 'bg-slate-800/80 text-slate-400 hover:text-white'
+                }`}
+              >
+                <Key className="w-4 h-4 text-amber-400" />
+                <span>استخر اصلی Gemini ({keysDetails.length} کلید)</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  setKeysModalTab('fallback');
+                  void fetchFallbackConfig();
+                }}
+                className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold transition-all cursor-pointer ${
+                  keysModalTab === 'fallback'
+                    ? 'bg-indigo-600 text-white shadow-md shadow-indigo-600/30 ring-1 ring-indigo-400'
+                    : 'bg-slate-800/80 text-slate-400 hover:text-white'
+                }`}
+              >
+                <Sparkles className="w-4 h-4 text-emerald-400" />
+                <span>هوش‌های مصنوعی کمکی (OpenAI, Claude, Custom)</span>
+                {((fallbackConfig.openaiKeys?.length || 0) + (fallbackConfig.claudeKeys?.length || 0) > 0 || fallbackConfig.customConfig?.apiKey) && (
+                  <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+                )}
+              </button>
+            </div>
+
+            {keysModalTab === 'gemini' && (
+              <div className="flex flex-col gap-5">
             {/* KPI Summary Cards */}
             {(() => {
               const totalKeys = keysDetails.length;
@@ -4329,6 +4520,245 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
                 </button>
               </div>
             </form>
+            </div>
+            )}
+
+            {/* Tab 2: Fallback AI Providers (OpenAI, Claude, Custom) */}
+            {keysModalTab === 'fallback' && (
+              <div className="flex flex-col gap-5">
+                {/* Fallback Intro & Strategy */}
+                <div className="bg-gradient-to-r from-violet-950/50 via-slate-950 to-indigo-950/50 border border-violet-500/30 rounded-2xl p-4 flex flex-col gap-3">
+                  <div className="flex items-center gap-2 text-violet-300 font-bold text-xs sm:text-sm">
+                    <Sparkles className="w-4 h-4 text-emerald-400" />
+                    <span>سیاست جایگزینی و سوییچ هوشمند هوش‌های مصنوعی:</span>
+                  </div>
+                  <p className="text-xs text-slate-300 leading-relaxed">
+                    این سیستم به گونه‌ای طراحی شده که تا وقتی کلیدهای پرسرعت و رایگان <strong className="text-emerald-300">Gemini 3.1 Flash Lite</strong> در دسترس هستند، ۱۰۰٪ کارها با جمینای انجام می‌شود. اگر سهمیه روزانه تمام کلیدهای جمینای تمام شود، سرور بدون متوقف کردن صف ترجمه، خودکار به کلیدهای زیر سوییچ می‌کند.
+                  </p>
+
+                  <div className="flex flex-col gap-2 pt-2 border-t border-slate-800">
+                    <label className="text-xs font-bold text-slate-200">استراتژی موتور ترجمه:</label>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
+                      {[
+                        { id: 'gemini_with_fallback', label: 'جمینای با پشتیبان خودکار (توصیه شده)', desc: 'اولویت با جمینای، در صورت اتمام سهمیه سوییچ خودکار' },
+                        { id: 'gemini_only', label: 'فقط جمینای', desc: 'بدون هیچ سوییچی، فقط با کلیدهای گوگل' },
+                        { id: 'openai', label: 'همیشه OpenAI', desc: 'استفاده مستقیم از مدل‌های GPT' },
+                        { id: 'claude', label: 'همیشه Claude', desc: 'استفاده مستقیم از مدل‌های Anthropic' },
+                        { id: 'custom', label: 'همیشه سرویس سفارشی', desc: 'استفاده از آدرس اختصاصی (DeepSeek و...)' },
+                      ].map((strat) => (
+                        <label
+                          key={strat.id}
+                          className={`flex items-start gap-2 p-2.5 rounded-xl border cursor-pointer transition-all ${
+                            fallbackConfig.providerStrategy === strat.id
+                              ? 'bg-indigo-600/20 border-indigo-500 text-white shadow-sm'
+                              : 'bg-slate-950/60 border-slate-800 text-slate-400 hover:text-slate-200'
+                          }`}
+                        >
+                          <input
+                            type="radio"
+                            name="providerStrategy"
+                            value={strat.id}
+                            checked={fallbackConfig.providerStrategy === strat.id}
+                            onChange={() => setFallbackConfig({ ...fallbackConfig, providerStrategy: strat.id as any })}
+                            className="mt-0.5 accent-indigo-500 shrink-0"
+                          />
+                          <div className="flex flex-col text-right">
+                            <span className="text-xs font-bold text-slate-100">{strat.label}</span>
+                            <span className="text-[10px] text-slate-400 mt-0.5">{strat.desc}</span>
+                          </div>
+                        </label>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+
+                {/* Test Result Alert */}
+                {fallbackTestResult && (
+                  <div
+                    className={`p-3.5 rounded-2xl text-xs border flex items-center justify-between gap-3 ${
+                      fallbackTestResult.success
+                        ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300'
+                        : 'bg-rose-500/10 border-rose-500/30 text-rose-300'
+                    }`}
+                  >
+                    <div className="flex items-center gap-2">
+                      {fallbackTestResult.success ? <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" /> : <AlertCircle className="w-4 h-4 text-rose-400 shrink-0" />}
+                      <span>{fallbackTestResult.message}</span>
+                    </div>
+                    {fallbackTestResult.latencyMs && (
+                      <span className="font-mono text-[11px] bg-slate-900 px-2 py-0.5 rounded border border-slate-800">
+                        تاخیر: {fallbackTestResult.latencyMs}ms
+                      </span>
+                    )}
+                  </div>
+                )}
+
+                {/* Provider 1: OpenAI */}
+                <div className="bg-slate-950/70 border border-slate-800 rounded-2xl p-4 flex flex-col gap-3">
+                  <div className="flex items-center justify-between flex-wrap gap-2 pb-2 border-b border-slate-800">
+                    <div className="flex items-center gap-2 font-bold text-slate-100 text-xs">
+                      <span className="w-2.5 h-2.5 rounded-full bg-emerald-400"></span>
+                      <span>سرویس OpenAI (GPT-4o-mini / GPT-4o)</span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <select
+                        value={fallbackConfig.openaiModel || 'gpt-4o-mini'}
+                        onChange={(e) => setFallbackConfig({ ...fallbackConfig, openaiModel: e.target.value })}
+                        className="bg-slate-900 border border-slate-700 text-slate-200 text-xs rounded-lg px-2.5 py-1 focus:outline-none"
+                      >
+                        <option value="gpt-4o-mini">gpt-4o-mini (سریع، دقیق و کم‌هزینه)</option>
+                        <option value="gpt-4o">gpt-4o (مدل پرچمدار)</option>
+                        <option value="gpt-3.5-turbo">gpt-3.5-turbo</option>
+                      </select>
+                      <button
+                        type="button"
+                        onClick={() => handleTestFallbackKey('openai')}
+                        disabled={isTestingFallback}
+                        className="px-3 py-1 bg-slate-800 hover:bg-slate-700 text-slate-200 text-[11px] font-bold rounded-lg border border-slate-700 flex items-center gap-1 cursor-pointer"
+                      >
+                        {isTestingFallback ? <Loader2 className="w-3 h-3 animate-spin" /> : <Play className="w-3 h-3 text-emerald-400" />}
+                        <span>تست آنلاین OpenAI</span>
+                      </button>
+                    </div>
+                  </div>
+                  <div>
+                    <label className="text-[11px] text-slate-400 block mb-1">
+                      کلیدهای OpenAI API (هر کلید در یک سطر):
+                    </label>
+                    <textarea
+                      rows={2}
+                      value={openaiKeysText}
+                      onChange={(e) => setOpenaiKeysText(e.target.value)}
+                      placeholder="sk-proj-..."
+                      className="w-full bg-slate-900 border border-slate-800 rounded-xl p-2.5 text-xs text-emerald-300 font-mono focus:outline-none focus:border-indigo-500 direction-ltr placeholder-slate-600"
+                    />
+                  </div>
+                </div>
+
+                {/* Provider 2: Anthropic Claude */}
+                <div className="bg-slate-950/70 border border-slate-800 rounded-2xl p-4 flex flex-col gap-3">
+                  <div className="flex items-center justify-between flex-wrap gap-2 pb-2 border-b border-slate-800">
+                    <div className="flex items-center gap-2 font-bold text-slate-100 text-xs">
+                      <span className="w-2.5 h-2.5 rounded-full bg-amber-400"></span>
+                      <span>سرویس Anthropic Claude (Claude 3.5 Haiku / Sonnet)</span>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <select
+                        value={fallbackConfig.claudeModel || 'claude-3-5-haiku-20241022'}
+                        onChange={(e) => setFallbackConfig({ ...fallbackConfig, claudeModel: e.target.value })}
+                        className="bg-slate-900 border border-slate-700 text-slate-200 text-xs rounded-lg px-2.5 py-1 focus:outline-none"
+                      >
+                        <option value="claude-3-5-haiku-20241022">claude-3-5-haiku (پرسرعت و هوشمند)</option>
+                        <option value="claude-3-5-sonnet-20241022">claude-3-5-sonnet (بالاترین کیفیت ادبی)</option>
+                      </select>
+                      <button
+                        type="button"
+                        onClick={() => handleTestFallbackKey('claude')}
+                        disabled={isTestingFallback}
+                        className="px-3 py-1 bg-slate-800 hover:bg-slate-700 text-slate-200 text-[11px] font-bold rounded-lg border border-slate-700 flex items-center gap-1 cursor-pointer"
+                      >
+                        {isTestingFallback ? <Loader2 className="w-3 h-3 animate-spin" /> : <Play className="w-3 h-3 text-amber-400" />}
+                        <span>تست آنلاین Claude</span>
+                      </button>
+                    </div>
+                  </div>
+                  <div>
+                    <label className="text-[11px] text-slate-400 block mb-1">
+                      کلیدهای Anthropic API (هر کلید در یک سطر):
+                    </label>
+                    <textarea
+                      rows={2}
+                      value={claudeKeysText}
+                      onChange={(e) => setClaudeKeysText(e.target.value)}
+                      placeholder="sk-ant-..."
+                      className="w-full bg-slate-900 border border-slate-800 rounded-xl p-2.5 text-xs text-amber-300 font-mono focus:outline-none focus:border-indigo-500 direction-ltr placeholder-slate-600"
+                    />
+                  </div>
+                </div>
+
+                {/* Provider 3: Custom Provider (OpenAI Compatible: DeepSeek, OpenRouter, vLLM, etc.) */}
+                <div className="bg-slate-950/70 border border-slate-800 rounded-2xl p-4 flex flex-col gap-3">
+                  <div className="flex items-center justify-between flex-wrap gap-2 pb-2 border-b border-slate-800">
+                    <div className="flex items-center gap-2 font-bold text-slate-100 text-xs">
+                      <span className="w-2.5 h-2.5 rounded-full bg-cyan-400"></span>
+                      <span>سرویس‌دهنده اختصاصی و دستی (سازگار با OpenAI: DeepSeek, OpenRouter, etc.)</span>
+                    </div>
+                    <button
+                      type="button"
+                      onClick={() => handleTestFallbackKey('custom')}
+                      disabled={isTestingFallback}
+                      className="px-3 py-1 bg-slate-800 hover:bg-slate-700 text-slate-200 text-[11px] font-bold rounded-lg border border-slate-700 flex items-center gap-1 cursor-pointer"
+                    >
+                      {isTestingFallback ? <Loader2 className="w-3 h-3 animate-spin" /> : <Play className="w-3 h-3 text-cyan-400" />}
+                      <span>تست آنلاین سرویس سفارشی</span>
+                    </button>
+                  </div>
+
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+                    <div>
+                      <label className="text-[11px] text-slate-400 block mb-1">نام یا عنوان سرویس:</label>
+                      <input
+                        type="text"
+                        value={customProviderName}
+                        onChange={(e) => setCustomProviderName(e.target.value)}
+                        placeholder="DeepSeek / OpenRouter"
+                        className="w-full bg-slate-900 border border-slate-800 rounded-xl px-3 py-2 text-xs text-white"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-[11px] text-slate-400 block mb-1">نام مدل (Model Name):</label>
+                      <input
+                        type="text"
+                        value={customModel}
+                        onChange={(e) => setCustomModel(e.target.value)}
+                        placeholder="deepseek-chat"
+                        className="w-full bg-slate-900 border border-slate-800 rounded-xl px-3 py-2 text-xs text-cyan-300 font-mono direction-ltr"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-[11px] text-slate-400 block mb-1">آدرس سرور (Base URL):</label>
+                      <input
+                        type="text"
+                        value={customBaseUrl}
+                        onChange={(e) => setCustomBaseUrl(e.target.value)}
+                        placeholder="https://api.deepseek.com/v1"
+                        className="w-full bg-slate-900 border border-slate-800 rounded-xl px-3 py-2 text-xs text-slate-200 font-mono direction-ltr"
+                      />
+                    </div>
+                    <div>
+                      <label className="text-[11px] text-slate-400 block mb-1">کلید API (API Key):</label>
+                      <input
+                        type="password"
+                        value={customApiKey}
+                        onChange={(e) => setCustomApiKey(e.target.value)}
+                        placeholder="sk-..."
+                        className="w-full bg-slate-900 border border-slate-800 rounded-xl px-3 py-2 text-xs text-amber-300 font-mono direction-ltr"
+                      />
+                    </div>
+                  </div>
+                </div>
+
+                {/* Fallback Save Footer */}
+                <div className="flex items-center justify-end gap-2.5 pt-3 border-t border-slate-800">
+                  <button
+                    type="button"
+                    onClick={() => setIsKeysModalOpen(false)}
+                    className="px-4 py-2 rounded-xl text-xs font-semibold text-slate-400 hover:text-white bg-slate-800 hover:bg-slate-700 transition-colors cursor-pointer"
+                  >
+                    بستن پنجره
+                  </button>
+                  <button
+                    type="button"
+                    onClick={handleSaveFallbackConfig}
+                    disabled={isSavingFallback}
+                    className="px-5 py-2 rounded-xl text-xs font-bold text-white bg-emerald-600 hover:bg-emerald-500 shadow-md shadow-emerald-600/30 transition-colors flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+                  >
+                    {isSavingFallback ? <Loader2 className="w-4 h-4 animate-spin" /> : <Check className="w-4 h-4" />}
+                    <span>ذخیره تنظیمات هوش‌های کمکی</span>
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
         </div>
       )}

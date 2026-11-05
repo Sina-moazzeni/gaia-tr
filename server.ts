@@ -46,6 +46,11 @@ import {
   getServerKeysWithDetails,
   getServerConfig,
   updateServerConfig,
+  getFallbackAIConfig,
+  updateFallbackAIConfig,
+  setOpenAiKeys,
+  setClaudeKeys,
+  setCustomProviderConfig,
   createBackupJson,
   restoreBackupJson,
   restoreBackupFileDirect,
@@ -73,6 +78,7 @@ import {
   resumeSingleProject,
   restartProject,
   testServerKey,
+  testFallbackProvider,
   resetWorkerExhaustionBackoff,
   pauseAllTranslations,
   resumeAllTranslations,
@@ -2746,6 +2752,50 @@ app.post('/api/server/config', (req, res) => {
     return res.json({ success: true, config: updated, message: 'تنظیمات سرور با موفقیت به‌روزرسانی شد.' });
   } catch (err: any) {
     return res.status(500).json({ success: false, error: err?.message });
+  }
+});
+
+// 16a. Fallback AI Providers (OpenAI, Claude, Custom): Get, Update, Test
+app.get('/api/server/fallback-providers', (req, res) => {
+  try {
+    const config = getFallbackAIConfig();
+    return res.json({ success: true, config });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message });
+  }
+});
+
+app.post('/api/server/fallback-providers', (req, res) => {
+  try {
+    const { openaiKeys, openaiModel, claudeKeys, claudeModel, customConfig, providerStrategy } = req.body || {};
+    const updated = updateFallbackAIConfig({
+      openaiKeys,
+      openaiModel,
+      claudeKeys,
+      claudeModel,
+      customConfig,
+      providerStrategy,
+    });
+    return res.json({
+      success: true,
+      config: updated,
+      message: 'تنظیمات هوش‌های مصنوعی پشتیبان (OpenAI, Claude, Custom) با موفقیت ذخیره شد.',
+    });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message });
+  }
+});
+
+app.post('/api/server/fallback-providers/test', async (req, res) => {
+  try {
+    const { provider, key, baseUrl, model } = req.body || {};
+    if (!provider || !key) {
+      return res.status(400).json({ success: false, message: 'ارائه‌دهنده و کلید الزامی هستند.' });
+    }
+    const result = await testFallbackProvider(provider, key, { baseUrl, model });
+    return res.json(result);
+  } catch (err: any) {
+    return res.status(500).json({ success: false, message: err?.message || 'خطا در تست کلید' });
   }
 });
 
