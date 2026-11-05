@@ -2958,7 +2958,7 @@ app.delete('/api/server/keys/:index', (req, res) => {
 });
 
 // 18. Background worker status check
-app.get('/api/background/status', (req, res) => {
+app.get(['/api/background/status', '/api/worker/status'], (req, res) => {
   try {
     const status = getWorkerStatus();
     return res.json({ success: true, status });
