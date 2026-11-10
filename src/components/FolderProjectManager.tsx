@@ -456,6 +456,42 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
     }
   };
 
+  const [isRestartingFolder, setIsRestartingFolder] = useState(false);
+
+  const handleRestartFolderFromScratch = async (folderIdTarget?: string, folderNameTarget?: string) => {
+    const targetId = folderIdTarget || selectedFolderId;
+    if (!targetId) return;
+    const fObj = folders.find((f) => f.id === targetId);
+    const folderName = folderNameTarget || fObj?.name || 'پوشه انتخابی';
+
+    const confirmMsg = `⚠️ هشدار ترجمه مجدد از صفر:\n\nآیا مطمئن هستید که می‌خواهید تمام فایل‌های پوشه «${folderName}» از ابتدا ترجمه شوند؟\n\n- تمامی ترجمه‌های قبلی تمام فایل‌های این پوشه پاک خواهند شد و پیشرفت به ۰٪ برمی‌گردد.\n- متن انگلیسی اصلی و زمان‌بندی دقیق زیرنویس‌ها کاملاً حفظ می‌شود (هیچ نیازی به آپلود مجدد فایل‌ها نیست).\n- موتور ترجمه هوشمند تمیز بلافاصله از سطر اول شروع به ترجمه دقیق خواهد کرد.\n\nادامه می‌دهید؟`;
+
+    if (!window.confirm(confirmMsg)) return;
+
+    setIsRestartingFolder(true);
+    onShowToast(`در حال پاکسازی ترجمه‌ها و آماده‌سازی پوشه «${folderName}» برای ترجمه مجدد از ابتدا...`, 'info');
+
+    try {
+      const res = await fetch(`/api/folders/${targetId}/restart-from-scratch`, {
+        method: 'POST',
+      });
+      const data = await res.json();
+      if (data.success) {
+        onShowToast(data.message || `تمامی فایل‌های پوشه «${folderName}» پاکسازی و ترجمه مجدد از ابتدا آغاز گردید.`, 'success');
+        if (selectedFolderId) await fetchProjects(selectedFolderId);
+        await fetchFolders();
+        if (activeView === 'all_files') await fetchAllProjects();
+        await fetchWorkerStatus();
+      } else {
+        onShowToast(data.error || 'خطا در ریست کردن پوشه', 'error');
+      }
+    } catch {
+      onShowToast('خطا در برقراری ارتباط با سرور برای ترجمه مجدد پوشه', 'error');
+    } finally {
+      setIsRestartingFolder(false);
+    }
+  };
+
   const handleSetDualConcurrency = async (files?: number, _keysPerProject?: number) => {
     try {
       const targetFiles = files || serverConfig.maxConcurrentProjects || 4;
@@ -2030,6 +2066,21 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
 
                 <button
                   type="button"
+                  onClick={() => handleRestartFolderFromScratch(currentFolder?.id, currentFolder?.name)}
+                  disabled={isRestartingFolder}
+                  className="flex items-center gap-2 px-4 py-2.5 rounded-xl font-bold text-xs bg-amber-500/15 hover:bg-amber-500/25 text-amber-300 border border-amber-500/40 hover:border-amber-400 cursor-pointer transition-all shadow-lg shadow-amber-500/10"
+                  title="پاکسازی تمام ترجمه‌های قبلی این پوشه و شروع ترجمه مجدد از ابتدا (۰٪) با موتور تمیز - بدون نیاز به آپلود مجدد فایل‌ها"
+                >
+                  {isRestartingFolder ? (
+                    <Loader2 className="w-4 h-4 animate-spin text-amber-400" />
+                  ) : (
+                    <RotateCcw className="w-4 h-4 text-amber-400" />
+                  )}
+                  <span>🔄 ترجمه مجدد پوشه از صفر</span>
+                </button>
+
+                <button
+                  type="button"
                   onClick={handleStopAllTranslations}
                   disabled={isStoppingAll}
                   className="flex items-center gap-2 px-4 py-2.5 rounded-xl font-bold text-xs bg-rose-600 hover:bg-rose-500 text-white shadow-lg shadow-rose-600/30 border border-rose-400/40 cursor-pointer transition-all"
@@ -2625,6 +2676,15 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
                             className="flex items-center gap-1 shrink-0"
                             onClick={(e) => e.stopPropagation()}
                           >
+                            <button
+                              type="button"
+                              onClick={() => handleRestartFolderFromScratch(folder.id, folder.name)}
+                              disabled={isRestartingFolder}
+                              className="p-1.5 text-slate-400 hover:text-amber-400 hover:bg-amber-500/10 rounded-lg transition-colors cursor-pointer"
+                              title="ترجمه مجدد کل این پوشه از صفر (پاکسازی ترجمه‌ها و شروع مجدد از ۰٪)"
+                            >
+                              <RotateCcw className="w-3.5 h-3.5" />
+                            </button>
                             <button
                               type="button"
                               onClick={() => {

@@ -1101,6 +1101,42 @@ export function resetProjectTranslation(projectId: string, onlyIncomplete: boole
 }
 
 /**
+ * Resets all subtitle projects in a given folder completely from scratch:
+ * - Wipes all item.translatedText = '' so progress returns to 0%
+ * - Sets translatedCues = 0, currentBatchIndex = 0, completedAt = undefined
+ * - Sets status = 'queued', isPriority = true, clears errors and failed cues
+ * - Preserves original English items, timestamps, IDs, and structure (no re-upload needed)
+ */
+export function resetFolderTranslationFromScratch(folderId: string): { count: number; folderName: string; projectIds: string[] } {
+  const db = getDatabase();
+  const folder = db.folders.find((f) => f.id === folderId);
+  const folderName = folder ? folder.name : folderId;
+
+  const projectsInFolder = db.projects.filter((p) => p.folderId === folderId);
+  const projectIds: string[] = [];
+
+  projectsInFolder.forEach((project) => {
+    projectIds.push(project.id);
+    project.status = 'queued';
+    project.errorMessage = undefined;
+    project.lastError = undefined;
+    project.failedCueIds = [];
+    project.currentBatchIndex = 0;
+    project.translatedCues = 0;
+    project.completedAt = undefined;
+    project.isPriority = true;
+    project.tokenUsage = { promptTokens: 0, candidatesTokens: 0, totalTokens: 0 };
+    project.items.forEach((item) => {
+      item.translatedText = '';
+    });
+    project.updatedAt = new Date().toISOString();
+  });
+
+  saveDatabaseSync();
+  return { count: projectsInFolder.length, folderName, projectIds };
+}
+
+/**
  * Auto-audit all subtitle projects on server.
  * Any cue that has English original text but was left with English translatedText
  * is reset to empty string ('') so the background worker can properly translate it into Persian.

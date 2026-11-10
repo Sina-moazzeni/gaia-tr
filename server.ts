@@ -81,6 +81,7 @@ import {
   pauseSingleProject,
   resumeSingleProject,
   restartProject,
+  restartFolderFromScratch,
   testServerKey,
   testFallbackProvider,
   resetWorkerExhaustionBackoff,
@@ -2684,6 +2685,21 @@ app.post('/api/folders/:folderId/resume', (req, res) => {
   try {
     const count = queueFolderForTranslation(req.params.folderId);
     return res.json({ success: true, count, message: `${count} پروژه برای ادامه ترجمه به صف اضافه شدند.` });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message });
+  }
+});
+
+// 14d-2. Folder restart from scratch (clears all translated text to '', 0% progress, preserves English and timings)
+app.post('/api/folders/:folderId/restart-from-scratch', (req, res) => {
+  try {
+    const result = restartFolderFromScratch(req.params.folderId);
+    return res.json({
+      success: true,
+      count: result.count,
+      folderName: result.folderName,
+      message: `تمامی ترجمه‌های قبلی در پوشه «${result.folderName}» پاکسازی شدند و ${result.count} فایل زیرنویس از ابتدا (۰٪) در صف ترجمه قرار گرفتند.`,
+    });
   } catch (err: any) {
     return res.status(500).json({ success: false, error: err?.message });
   }

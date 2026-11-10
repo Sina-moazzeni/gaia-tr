@@ -25,6 +25,7 @@ import {
   getFallbackAIConfig,
   FallbackAIConfig,
   resetProjectTranslation,
+  resetFolderTranslationFromScratch,
   recordKeyUsage,
   retryDisruptedAndIncompleteProjects,
   setProjectPriority,
@@ -1768,6 +1769,34 @@ export function pauseFolderTranslation(folderId: string): number {
 
   saveDatabaseSync();
   return folderProjects.length;
+}
+
+/**
+ * Restart all projects in a folder completely from scratch:
+ * 1. Resets all translated cues to '' (0% progress)
+ * 2. Clears in-flight cues and active working sets for these projects
+ * 3. Sets status = 'queued', isPriority = true
+ * 4. Clears previous errors
+ * 5. Wakes up the worker immediately
+ */
+export function restartFolderFromScratch(folderId: string): { count: number; folderName: string } {
+  const result = resetFolderTranslationFromScratch(folderId);
+
+  // Clear active locks and in-flight tracking for projects in this folder
+  for (const pid of result.projectIds) {
+    activeProjectWorkingSet.delete(pid);
+    for (const cueKey of Array.from(inFlightCueKeys)) {
+      if (cueKey.startsWith(`${pid}_`)) {
+        inFlightCueKeys.delete(cueKey);
+        inFlightCueTimestamps.delete(cueKey);
+      }
+    }
+  }
+
+  resetWorkerExhaustionBackoff();
+  lastWorkerStatusMessage = `پوشه «${result.folderName}» با موفقیت ریست شد و ترجمه تمام ${result.count} فایل از ابتدا (۰٪) آغاز گردید.`;
+  console.log(`[BackgroundWorker] Folder ${folderId} (${result.folderName}) restarted from scratch: ${result.count} projects.`);
+  return { count: result.count, folderName: result.folderName };
 }
 
 /**
