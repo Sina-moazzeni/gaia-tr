@@ -233,6 +233,11 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
   const [keysDetails, setKeysDetails] = useState<KeyDetailItem[]>([]);
   const [editingKeyIndex, setEditingKeyIndex] = useState<number | null>(null);
   const [editingKeyVal, setEditingKeyVal] = useState('');
+  const [selectedKeyIndices, setSelectedKeyIndices] = useState<number[]>([]);
+  const [batchKeyModel, setBatchKeyModel] = useState<string>('gemini-3.1-flash-lite');
+  const [customKeyModelInput, setCustomKeyModelInput] = useState<string>('');
+  const [isBatchDeletingKeys, setIsBatchDeletingKeys] = useState(false);
+  const [isChangingPoolModel, setIsChangingPoolModel] = useState(false);
 
   // Server & Network Configuration Modal
   const [isServerConfigOpen, setIsServerConfigOpen] = useState(false);
@@ -1390,20 +1395,86 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
       return;
     }
 
+    const modelToSet = batchKeyModel === 'custom' ? customKeyModelInput.trim() : batchKeyModel;
+
     try {
       const res = await fetch('/api/server/keys', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ keys: lines, mode: keySaveMode }),
+        body: JSON.stringify({ keys: lines, mode: keySaveMode, model: modelToSet }),
       });
       const data = await res.json();
       if (data.success) {
         onShowToast(data.message || 'کلیدها با موفقیت در سرور ثبت شدند.', 'success');
         setServerKeysText('');
         fetchServerKeys();
+        fetchWorkerStatus();
       }
     } catch {
       onShowToast('خطا در ذخیره کلیدهای سرور', 'error');
+    }
+  };
+
+  // Batch delete selected server keys or delete all
+  const handleBatchDeleteKeys = async (deleteAll = false) => {
+    if (!deleteAll && selectedKeyIndices.length === 0) {
+      onShowToast('لطفاً حداقل یک کلید را برای حذف انتخاب کنید.', 'error');
+      return;
+    }
+    const confirmMsg = deleteAll
+      ? 'آیا مطمئن هستید که می‌خواهید تمام کلیدهای استخر سرور را حذف کنید؟'
+      : `آیا از حذف ${selectedKeyIndices.length} کلید انتخاب‌شده مطمئن هستید؟`;
+    if (!window.confirm(confirmMsg)) return;
+
+    setIsBatchDeletingKeys(true);
+    try {
+      const res = await fetch('/api/server/keys/batch-delete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ indices: selectedKeyIndices, deleteAll }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        onShowToast(data.message || 'حذف کلیدها با موفقیت انجام شد.', 'info');
+        setSelectedKeyIndices([]);
+        await fetchServerKeys();
+        await fetchWorkerStatus();
+      } else {
+        onShowToast(data.error || 'خطا در حذف کلیدها', 'error');
+      }
+    } catch {
+      onShowToast('خطا در ارتباط با سرور برای حذف کلیدها', 'error');
+    } finally {
+      setIsBatchDeletingKeys(false);
+    }
+  };
+
+  // Batch change active model for server keys
+  const handleChangePoolModel = async (modelToApply: string) => {
+    const targetModel = modelToApply === 'custom' ? customKeyModelInput.trim() : modelToApply;
+    if (!targetModel) {
+      onShowToast('لطفاً نام مدل را وارد کنید.', 'error');
+      return;
+    }
+    setIsChangingPoolModel(true);
+    try {
+      const res = await fetch('/api/server/keys/change-model', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model: targetModel }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        onShowToast(data.message || `مدل استخر با موفقیت به «${targetModel}» تغییر یافت.`, 'success');
+        setBatchKeyModel(targetModel);
+        await fetchWorkerStatus();
+      } else {
+        onShowToast(data.error || 'خطا در تغییر مدل استخر', 'error');
+      }
+    } catch {
+      onShowToast('خطا در ارتباط با سرور برای تغییر مدل استخر', 'error');
+    } finally {
+      setIsChangingPoolModel(false);
     }
   };
 
@@ -3782,14 +3853,19 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
 
             <form onSubmit={handleExecuteFolderBatchReplace} className="flex flex-col gap-4">
               <div>
-                <label className="text-xs text-slate-300 font-semibold block mb-1">
-                  کلمه یا عبارت جستجو:
-                </label>
+                <div className="flex items-center justify-between mb-1">
+                  <label className="text-xs text-slate-300 font-semibold block">
+                    کلمه یا عبارت دقیق برای جستجو:
+                  </label>
+                  <span className="text-[10px] text-emerald-400 font-mono">
+                    ✓ تطابق دقیق عبارت (Exact Phrase)
+                  </span>
+                </div>
                 <input
                   type="text"
                   value={batchFindText}
                   onChange={(e) => setBatchFindText(e.target.value)}
-                  placeholder="مثال: موجودات فضایی"
+                  placeholder="مثال: سلام دنیا (عیناً این دو کلمه کنار هم جایگزین می‌شوند)"
                   required
                   className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-indigo-500"
                   autoFocus
@@ -4263,6 +4339,82 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
                 </div>
               </div>
 
+              {/* Batch Controls Toolbar: Select All, Batch Delete, Batch Model Change */}
+              <div className="bg-slate-950/80 border border-slate-800 rounded-xl p-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs">
+                <div className="flex items-center gap-3 flex-wrap">
+                  <label className="flex items-center gap-1.5 cursor-pointer font-bold text-slate-300">
+                    <input
+                      type="checkbox"
+                      checked={keysDetails.length > 0 && selectedKeyIndices.length === keysDetails.length}
+                      onChange={(e) => {
+                        if (e.target.checked) setSelectedKeyIndices(keysDetails.map((k) => k.index));
+                        else setSelectedKeyIndices([]);
+                      }}
+                      className="accent-indigo-500 w-4 h-4 rounded cursor-pointer"
+                    />
+                    <span>انتخاب همه ({selectedKeyIndices.length} از {keysDetails.length})</span>
+                  </label>
+
+                  {selectedKeyIndices.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => handleBatchDeleteKeys(false)}
+                      disabled={isBatchDeletingKeys}
+                      className="flex items-center gap-1.5 px-3 py-1 rounded-lg text-xs font-bold bg-rose-600/30 text-rose-300 hover:bg-rose-600/50 border border-rose-500/40 cursor-pointer transition-colors"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                      <span>حذف انتخاب‌شده‌ها ({selectedKeyIndices.length})</span>
+                    </button>
+                  )}
+
+                  {keysDetails.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => handleBatchDeleteKeys(true)}
+                      disabled={isBatchDeletingKeys}
+                      className="flex items-center gap-1 px-2.5 py-1 rounded-lg text-[11px] text-slate-400 hover:text-rose-300 bg-slate-900 border border-slate-800 hover:border-rose-500/30 cursor-pointer transition-colors"
+                      title="پاکسازی کامل استخر و حذف تمام کلیدها"
+                    >
+                      <span>پاکسازی کل استخر</span>
+                    </button>
+                  )}
+                </div>
+
+                {/* Batch Model Changer */}
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className="text-slate-400 font-semibold shrink-0">مدل استخر:</span>
+                  <select
+                    value={batchKeyModel}
+                    onChange={(e) => setBatchKeyModel(e.target.value)}
+                    className="bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1 text-xs text-amber-300 font-mono focus:outline-none focus:border-indigo-500"
+                  >
+                    <option value="gemini-3.1-flash-lite">Gemini 3.1 Flash Lite (فوق‌سریع - پیش‌فرض)</option>
+                    <option value="gemini-flash-latest">Gemini Flash Latest (نسخه پایدار)</option>
+                    <option value="gemini-3.8-flash">Gemini 3.8 Flash (دقت بالا)</option>
+                    <option value="gemini-2.5-flash">Gemini 2.5 Flash</option>
+                    <option value="custom">مدل سفارشی...</option>
+                  </select>
+                  {batchKeyModel === 'custom' && (
+                    <input
+                      type="text"
+                      placeholder="مثال: gemini-..."
+                      value={customKeyModelInput}
+                      onChange={(e) => setCustomKeyModelInput(e.target.value)}
+                      className="bg-slate-900 border border-slate-700 rounded-lg px-2 py-1 text-xs text-white w-32 font-mono"
+                    />
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => handleChangePoolModel(batchKeyModel)}
+                    disabled={isChangingPoolModel}
+                    className="px-3 py-1 rounded-lg text-xs font-bold bg-indigo-600 hover:bg-indigo-500 text-white transition-colors cursor-pointer disabled:opacity-50"
+                    title="تغییر دسته جمعی مدل فعال برای تمام کلیدهای استخر"
+                  >
+                    {isChangingPoolModel ? 'در حال اعمال...' : 'اعمال مدل'}
+                  </button>
+                </div>
+              </div>
+
               {keysDetails.length === 0 ? (
                 <div className="text-xs text-amber-300/90 bg-amber-500/10 border border-amber-500/20 rounded-2xl p-4 text-center">
                   هنوز هیچ کلیدی در سرور ذخیره نشده است. با استفاده از کادر زیر کلیدهای Gemini خود را وارد کنید.
@@ -4310,6 +4462,15 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
                         <div className="flex flex-col md:flex-row md:items-center justify-between gap-3">
                           {/* Key Identity & Status */}
                           <div className="flex items-center gap-2.5 min-w-0">
+                            <input
+                              type="checkbox"
+                              checked={selectedKeyIndices.includes(k.index)}
+                              onChange={(e) => {
+                                if (e.target.checked) setSelectedKeyIndices((prev) => [...prev, k.index]);
+                                else setSelectedKeyIndices((prev) => prev.filter((i) => i !== k.index));
+                              }}
+                              className="accent-indigo-500 w-4 h-4 rounded cursor-pointer shrink-0"
+                            />
                             <span className="w-6 h-6 rounded-lg bg-slate-800 border border-slate-700 flex items-center justify-center text-[11px] font-mono text-slate-300 font-bold shrink-0">
                               #{k.index + 1}
                             </span>
@@ -4514,6 +4675,33 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
                     />
                     <span>جایگزینی کل استخر کلیدها</span>
                   </label>
+                </div>
+              </div>
+
+              {/* Model selection when adding keys */}
+              <div className="flex items-center justify-between flex-wrap gap-2 bg-slate-950/60 p-2.5 rounded-xl border border-slate-800 text-xs">
+                <span className="text-slate-300 font-medium">مدل ترجمه برای این کلیدها:</span>
+                <div className="flex items-center gap-2">
+                  <select
+                    value={batchKeyModel}
+                    onChange={(e) => setBatchKeyModel(e.target.value)}
+                    className="bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1 text-xs text-amber-300 font-mono focus:outline-none focus:border-indigo-500"
+                  >
+                    <option value="gemini-3.1-flash-lite">Gemini 3.1 Flash Lite (فوق‌سریع - پیش‌فرض)</option>
+                    <option value="gemini-flash-latest">Gemini Flash Latest</option>
+                    <option value="gemini-3.8-flash">Gemini 3.8 Flash</option>
+                    <option value="gemini-2.5-flash">Gemini 2.5 Flash</option>
+                    <option value="custom">مدل سفارشی...</option>
+                  </select>
+                  {batchKeyModel === 'custom' && (
+                    <input
+                      type="text"
+                      placeholder="نام مدل..."
+                      value={customKeyModelInput}
+                      onChange={(e) => setCustomKeyModelInput(e.target.value)}
+                      className="bg-slate-900 border border-slate-700 rounded-lg px-2 py-1 text-xs text-white w-32 font-mono"
+                    />
+                  )}
                 </div>
               </div>
 
@@ -5061,7 +5249,11 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
                           <span className="w-6 h-6 rounded-md bg-slate-800 text-slate-300 flex items-center justify-center font-bold text-[11px]">
                             {cue.id}
                           </span>
-                          <span className="text-slate-300 dir-ltr">{cue.startTime} ➔ {cue.endTime}</span>
+                          <span dir="ltr" className="text-slate-300 font-mono inline-flex items-center gap-1.5" style={{ direction: 'ltr' }}>
+                            <span>{cue.startTime}</span>
+                            <span className="text-slate-500">➔</span>
+                            <span>{cue.endTime}</span>
+                          </span>
                         </div>
                         {!isProper ? (
                           <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/30 flex items-center gap-1 font-sans">

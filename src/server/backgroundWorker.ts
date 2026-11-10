@@ -54,6 +54,14 @@ export function getActiveTranslationModel(): string {
   return activeTranslationModel;
 }
 
+export function setActiveTranslationModel(model: string): string {
+  if (model && typeof model === 'string' && model.trim()) {
+    activeTranslationModel = model.trim();
+    console.log(`[BackgroundWorker] Active translation model set to: ${activeTranslationModel}`);
+  }
+  return activeTranslationModel;
+}
+
 // Quota-Optimized High-Speed batch sizes:
 // 35 cues per standard request, 20 cues near end (<= 120 cues remaining).
 // Drastically cuts request count per file by 35-40% while preserving ultra-speed sub-second translations!
@@ -240,13 +248,6 @@ const COMMON_WORD_MAP: Record<string, string> = {
   end: 'پایان',
 };
 
-const LATIN_TO_PERSIAN_CHAR_MAP: Record<string, string> = {
-  a: 'ا', b: 'ب', c: 'ک', d: 'د', e: 'ای', f: 'ف', g: 'گ', h: 'ه',
-  i: 'ای', j: 'ج', k: 'ک', l: 'ل', m: 'م', n: 'ن', o: 'او', p: 'پ',
-  q: 'ق', r: 'ر', s: 'س', t: 'ت', u: 'یو', v: 'و', w: 'و', x: 'اکس',
-  y: 'ی', z: 'ز',
-};
-
 export function resolveStubbornEnglishCue(original: string, candidate: string): string {
   const clean = (candidate || original || '').trim();
   const lower = clean.toLowerCase().replace(/[^a-z0-9]/g, '');
@@ -260,25 +261,8 @@ export function resolveStubbornEnglishCue(original: string, candidate: string): 
     return candidate.trim();
   }
 
-  const words = clean.split(/\s+/).map((word) => {
-    const wLower = word.toLowerCase().replace(/[^a-z0-9]/g, '');
-    if (COMMON_WORD_MAP[wLower]) return COMMON_WORD_MAP[wLower];
-    if (/^\d+$/.test(wLower)) return word;
-    // Transliterate English chars to Persian
-    const tr = word
-      .toLowerCase()
-      .split('')
-      .map((ch) => LATIN_TO_PERSIAN_CHAR_MAP[ch] || ch)
-      .join('');
-    return tr;
-  });
-
-  let result = words.join(' ').trim();
-  // Ensure that it has at least one Persian character so that isCueProperlyTranslated never rejects it
-  if (!/[\u0600-\u06FF]/.test(result)) {
-    result = `${result} (فارسی)`;
-  }
-  return result || 'بله';
+  // Never generate character-by-character phonetic transliterations into gibberish
+  return '';
 }
 
 export interface ActiveProjectSummary {
@@ -685,9 +669,10 @@ export function parseTranslationsJson(
     const soundFix = autoTranslateSoundEffect(it.text);
     const candidate = rawTranslated?.trim() || soundFix || '';
     const isValid = candidate.length > 0 && isCueProperlyTranslated(it.text, candidate, targetLanguage);
+    const hasPersian = candidate && /[\u0600-\u06FF]/.test(candidate);
     return {
       id: it.id,
-      text: isValid ? candidate : (soundFix || candidate || resolveStubbornEnglishCue(it.text, '') || it.text),
+      text: isValid ? candidate : (soundFix || (hasPersian ? candidate : '')),
     };
   });
 }
@@ -737,9 +722,13 @@ export async function translateBatchWithDedicatedKey(
 
     let keyFailedWithRateOrAuth = false;
 
+    const config = getServerConfig();
+    const hasProxy = Boolean(config.geminiBaseUrl || process.env.GEMINI_BASE_URL);
+    const requestTimeoutMs = hasProxy ? 65000 : 45000;
+
     for (const modelToUse of modelsToAttempt) {
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 15000); // Strict 15s timeout prevents any hanging request
+      const timeoutId = setTimeout(() => controller.abort(), requestTimeoutMs);
 
       try {
         const ai = createGenAI(currentKey);
@@ -1207,8 +1196,10 @@ async function processProjectChunkBatch(
         cueRetryCountMap.delete(cueKey);
       } else {
         const soundFix = autoTranslateSoundEffect(cue.originalText);
-        liveItem.translatedText = soundFix || resolveStubbornEnglishCue(cue.originalText, '') || cue.originalText;
-        cueRetryCountMap.delete(cueKey);
+        if (soundFix) {
+          liveItem.translatedText = soundFix;
+          cueRetryCountMap.delete(cueKey);
+        }
       }
     }
 
@@ -1268,12 +1259,14 @@ async function processProjectChunkBatch(
       const cueKey = `${project.id}_${cue.id}`;
       const retries = (cueRetryCountMap.get(cueKey) || 0) + 1;
       cueRetryCountMap.set(cueKey, retries);
-      if (retries >= 2) {
+      if (retries >= 8) {
         const liveItem = project.items.find((i) => i.id === cue.id);
         if (liveItem && (!liveItem.translatedText || !liveItem.translatedText.trim())) {
           const soundFix = autoTranslateSoundEffect(cue.originalText);
-          liveItem.translatedText = soundFix || resolveStubbornEnglishCue(cue.originalText, '') || cue.originalText.trim();
-          console.warn(`[BackgroundWorker] Auto-rescued stubborn cue #${cue.id} in ${project.name}: "${liveItem.translatedText}"`);
+          if (soundFix) {
+            liveItem.translatedText = soundFix;
+            console.warn(`[BackgroundWorker] Auto-resolved sound cue #${cue.id} in ${project.name}: "${liveItem.translatedText}"`);
+          }
         }
         cueRetryCountMap.delete(cueKey);
       }

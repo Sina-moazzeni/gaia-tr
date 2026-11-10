@@ -43,6 +43,8 @@ import {
   addServerKeys,
   updateSingleServerKey,
   deleteSingleServerKey,
+  deleteBatchServerKeys,
+  deleteAllServerKeys,
   getServerKeysWithDetails,
   getServerConfig,
   updateServerConfig,
@@ -71,6 +73,8 @@ import {
   startBackgroundWorker,
   stopBackgroundWorker,
   getWorkerStatus,
+  getActiveTranslationModel,
+  setActiveTranslationModel,
   queueFolderForTranslation,
   pauseFolderTranslation,
   queueSingleProject,
@@ -2904,16 +2908,21 @@ app.post('/api/server/keys/clear-disabled', (req, res) => {
 // 18. Add / update server keys (batch)
 app.post('/api/server/keys', (req, res) => {
   try {
-    const { keys, mode = 'append' } = req.body || {};
+    const { keys, mode = 'append', model } = req.body || {};
     if (!Array.isArray(keys)) {
       return res.status(400).json({ success: false, error: 'Keys array required' });
     }
     const updatedKeys = mode === 'replace' ? setServerKeys(keys) : addServerKeys(keys);
+    if (model && typeof model === 'string' && model.trim()) {
+      setActiveTranslationModel(model.trim());
+    }
     resetWorkerExhaustionBackoff();
     return res.json({
       success: true,
       count: updatedKeys.length,
-      message: `تعداد ${updatedKeys.length} کلید API در استخر سرور فعال شد.`,
+      model: getActiveTranslationModel(),
+      message: `تعداد ${updatedKeys.length} کلید API در استخر سرور فعال شد.${model ? ` مدل فعال به «${model}» تنظیم شد.` : ''}`,
+      details: getServerKeysWithDetails(),
     });
   } catch (err: any) {
     return res.status(500).json({ success: false, error: err?.message });
@@ -2951,6 +2960,50 @@ app.delete('/api/server/keys/:index', (req, res) => {
       count: updatedKeys.length,
       message: `کلید مورد نظر با موفقیت از استخر سرور حذف شد.`,
       details: getServerKeysWithDetails(),
+    });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message });
+  }
+});
+
+// 18d. Batch delete server keys or delete all
+app.post('/api/server/keys/batch-delete', (req, res) => {
+  try {
+    const { indices, deleteAll } = req.body || {};
+    let updatedKeys: string[] = [];
+    if (deleteAll) {
+      updatedKeys = deleteAllServerKeys();
+    } else if (Array.isArray(indices) && indices.length > 0) {
+      updatedKeys = deleteBatchServerKeys(indices);
+    } else {
+      return res.status(400).json({ success: false, error: 'لیست اندیس‌های انتخابی الزامی است.' });
+    }
+    resetWorkerExhaustionBackoff();
+    return res.json({
+      success: true,
+      count: updatedKeys.length,
+      message: deleteAll
+        ? 'تمامی کلیدهای استخر سرور با موفقیت حذف شدند.'
+        : `${indices.length} کلید انتخاب‌شده با موفقیت حذف شدند.`,
+      details: getServerKeysWithDetails(),
+    });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message });
+  }
+});
+
+// 18e. Batch change active model for server keys
+app.post('/api/server/keys/change-model', (req, res) => {
+  try {
+    const { model } = req.body || {};
+    if (!model || typeof model !== 'string' || !model.trim()) {
+      return res.status(400).json({ success: false, error: 'نام مدل الزامی است.' });
+    }
+    const updatedModel = setActiveTranslationModel(model.trim());
+    return res.json({
+      success: true,
+      model: updatedModel,
+      message: `مدل پیش‌فرض کلیدهای استخر سرور با موفقیت به «${updatedModel}» تغییر یافت.`,
     });
   } catch (err: any) {
     return res.status(500).json({ success: false, error: err?.message });

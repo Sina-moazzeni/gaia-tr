@@ -58,13 +58,13 @@ export const BatchFindReplaceModal: React.FC<BatchFindReplaceModalProps> = ({
     if (!findText) return null;
     try {
       if (useRegex) {
-        return new RegExp(findText, matchCase ? 'g' : 'gi');
+        return new RegExp(findText, matchCase ? 'gu' : 'giu');
       }
       let escaped = findText.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       if (wholeWord) {
-        escaped = `\\b${escaped}\\b`;
+        escaped = `(?<=^|[^\\p{L}\\p{N}_])${escaped}(?=$|[^\\p{L}\\p{N}_])`;
       }
-      return new RegExp(escaped, matchCase ? 'g' : 'gi');
+      return new RegExp(escaped, matchCase ? 'gu' : 'giu');
     } catch {
       return null;
     }

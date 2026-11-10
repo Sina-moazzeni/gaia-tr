@@ -322,13 +322,14 @@ export function batchReplaceInFolder(
   let pattern: RegExp;
   try {
     if (useRegex) {
-      pattern = new RegExp(findText, matchCase ? 'g' : 'gi');
+      pattern = new RegExp(findText, matchCase ? 'gu' : 'giu');
     } else {
       let escaped = findText.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       if (wholeWord) {
-        escaped = `\\b${escaped}\\b`;
+        // Unicode-aware word boundary for Persian, Arabic, English, etc.
+        escaped = `(?<=^|[^\\p{L}\\p{N}_])${escaped}(?=$|[^\\p{L}\\p{N}_])`;
       }
-      pattern = new RegExp(escaped, matchCase ? 'g' : 'gi');
+      pattern = new RegExp(escaped, matchCase ? 'gu' : 'giu');
     }
   } catch {
     return { totalReplacements: 0, affectedFilesCount: 0, fileDetails: [] };
@@ -674,6 +675,35 @@ export function deleteSingleServerKey(index: number): string[] {
     saveDatabaseSync();
   }
   return getServerKeys();
+}
+
+export function deleteBatchServerKeys(indices: number[]): string[] {
+  const db = getDatabase();
+  if (!db.serverKeys || db.serverKeys.length === 0) return [];
+  const indexSet = new Set(indices);
+  const remainingKeys: string[] = [];
+  db.serverKeys.forEach((key, idx) => {
+    if (indexSet.has(idx)) {
+      resetKeyCooldown(key);
+    } else {
+      remainingKeys.push(key);
+    }
+  });
+  db.serverKeys = remainingKeys;
+  db.activeKeyIndex = 0;
+  saveDatabaseSync();
+  return getServerKeys();
+}
+
+export function deleteAllServerKeys(): string[] {
+  const db = getDatabase();
+  if (db.serverKeys) {
+    db.serverKeys.forEach((k) => resetKeyCooldown(k));
+    db.serverKeys = [];
+    db.activeKeyIndex = 0;
+    saveDatabaseSync();
+  }
+  return [];
 }
 
 export type KeyExhaustionType = 'minute' | 'daily';
