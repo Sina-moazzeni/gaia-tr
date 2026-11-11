@@ -1684,6 +1684,7 @@ export async function testFallbackProvider(
           messages: [{ role: 'user', content: 'سلام' }],
           max_tokens: 5,
         }),
+        signal: AbortSignal.timeout(25000),
       });
       const latencyMs = Date.now() - start;
       if (res.ok) {
@@ -1694,7 +1695,9 @@ export async function testFallbackProvider(
     }
   } catch (err: any) {
     const latencyMs = Date.now() - start;
-    return { success: false, latencyMs, message: 'خطای شبکه در اتصال به هوش مصنوعی', error: err?.message || String(err) };
+    const isTimeout = err?.name === 'TimeoutError' || err?.message?.includes('timeout') || err?.name === 'AbortError';
+    const msg = isTimeout ? 'مهلت زمان تست (۲۵ ثانیه) به پایان رسید.' : (err?.message || 'خطای شبکه در اتصال به هوش مصنوعی');
+    return { success: false, latencyMs, message: msg, error: err?.message || String(err) };
   }
 }
 

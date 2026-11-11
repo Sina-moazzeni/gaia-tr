@@ -560,7 +560,7 @@ async function testCustomProviderConnection(config: {
 
   const startTime = Date.now();
   const controller = new AbortController();
-  const timeoutTimer = setTimeout(() => controller.abort(), 12000);
+  const timeoutTimer = setTimeout(() => controller.abort(), 25000);
 
   try {
     const response = await fetch(targetUrl, {
@@ -663,7 +663,7 @@ async function testCustomProviderConnection(config: {
       return {
         success: false,
         errorType: 'timeout',
-        error: 'Connection timed out after 12 seconds.',
+        error: 'Connection timed out after 25 seconds.',
         latencyMs,
       };
     }
