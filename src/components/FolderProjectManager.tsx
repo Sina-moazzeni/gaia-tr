@@ -268,8 +268,11 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
     claudeKeys: [],
     claudeModel: 'claude-3-5-haiku-20241022',
     customConfig: { baseUrl: '', apiKey: '', model: 'deepseek-chat', name: 'سرویس سفارشی' },
-    providerStrategy: 'gemini_with_fallback',
+    providerStrategy: 'lowest_ping',
   });
+  const [providerPriorityOrder, setProviderPriorityOrder] = useState<string[]>(['custom', 'gemini', 'openai', 'claude']);
+  const [providerPings, setProviderPings] = useState<Record<string, { latencyMs: number; isAvailable: boolean; message?: string }>>({});
+  const [isMeasuringPings, setIsMeasuringPings] = useState(false);
   const [openaiKeysText, setOpenaiKeysText] = useState('');
   const [claudeKeysText, setClaudeKeysText] = useState('');
   const [customBaseUrl, setCustomBaseUrl] = useState('');
@@ -573,6 +576,12 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
       const data = await res.json();
       if (data.success && data.config) {
         setFallbackConfig(data.config);
+        if (data.config.priorityOrder && Array.isArray(data.config.priorityOrder)) {
+          setProviderPriorityOrder(data.config.priorityOrder);
+        }
+        if (data.pings) {
+          setProviderPings(data.pings);
+        }
         setOpenaiKeysText((data.config.openaiKeys || []).join('\n'));
         setClaudeKeysText((data.config.claudeKeys || []).join('\n'));
         if (data.config.customConfig) {
@@ -581,6 +590,48 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
           setCustomModel(data.config.customConfig.model || 'deepseek-chat');
           setCustomProviderName(data.config.customConfig.name || 'سرویس سفارشی');
         }
+      }
+    } catch {}
+  };
+
+  const handleMeasureAllPings = async () => {
+    setIsMeasuringPings(true);
+    try {
+      const res = await fetch('/api/server/fallback-providers/measure-all-pings', { method: 'POST' });
+      const data = await res.json();
+      if (data.success && data.pings) {
+        setProviderPings(data.pings);
+        onShowToast('✓ تست و سنجش پینگ تمامی هوش‌های مصنوعی انجام شد.', 'success');
+      } else {
+        onShowToast('خطا در سنجش پینگ مدل‌ها', 'error');
+      }
+    } catch {
+      onShowToast('خطای شبکه در تست پینگ', 'error');
+    } finally {
+      setIsMeasuringPings(false);
+    }
+  };
+
+  const handleMovePriority = async (index: number, direction: 'up' | 'down') => {
+    const newOrder = [...providerPriorityOrder];
+    const targetIndex = direction === 'up' ? index - 1 : index + 1;
+    if (targetIndex < 0 || targetIndex >= newOrder.length) return;
+
+    const temp = newOrder[index];
+    newOrder[index] = newOrder[targetIndex];
+    newOrder[targetIndex] = temp;
+
+    setProviderPriorityOrder(newOrder);
+
+    try {
+      const res = await fetch('/api/server/fallback-providers/priority-order', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ priorityOrder: newOrder, providerStrategy: fallbackConfig.providerStrategy }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        onShowToast('ترتیب اولویت تغییر کرد و در سرور ذخیره شد.', 'info');
       }
     } catch {}
   };
@@ -1655,7 +1706,8 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
           model: customModel.trim() || 'deepseek-chat',
           name: customProviderName.trim() || 'سرویس سفارشی',
         },
-        providerStrategy: fallbackConfig.providerStrategy || 'gemini_with_fallback',
+        providerStrategy: fallbackConfig.providerStrategy || 'lowest_ping',
+        priorityOrder: providerPriorityOrder,
       };
       const res = await fetch('/api/server/fallback-providers', {
         method: 'POST',
@@ -5075,27 +5127,28 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
                 <div className="bg-gradient-to-r from-violet-950/50 via-slate-950 to-indigo-950/50 border border-violet-500/30 rounded-2xl p-4 flex flex-col gap-3">
                   <div className="flex items-center gap-2 text-violet-300 font-bold text-xs sm:text-sm">
                     <Sparkles className="w-4 h-4 text-emerald-400" />
-                    <span>سیاست جایگزینی و سوییچ هوشمند هوش‌های مصنوعی:</span>
+                    <span>سیاست هوشمند اولویت‌بندی، سرعت (پینگ) و سوییچ هوش‌های مصنوعی:</span>
                   </div>
                   <p className="text-xs text-slate-300 leading-relaxed">
-                    این سیستم به گونه‌ای طراحی شده که تا وقتی کلیدهای پرسرعت و رایگان <strong className="text-emerald-300">Gemini 3.1 Flash Lite</strong> در دسترس هستند، ۱۰۰٪ کارها با جمینای انجام می‌شود. اگر سهمیه روزانه تمام کلیدهای جمینای تمام شود، سرور بدون متوقف کردن صف ترجمه، خودکار به کلیدهای زیر سوییچ می‌کند.
+                    می‌توانید اولویت پیش‌فرض را از جمنای بردارید و روی <strong className="text-cyan-300">«کمترین پینگ (پاسخ سریع‌تر)»</strong> بگذارید تا سرور خودکار سریع‌ترین مدل را انتخاب کند، یا با کلیک روی فلش‌های بالا/پایین در کادر زیر، <strong className="text-amber-300">ترتیب اولویت دلخواه خودتان</strong> را جابه‌جا کنید.
                   </p>
 
                   <div className="flex flex-col gap-2 pt-2 border-t border-slate-800">
-                    <label className="text-xs font-bold text-slate-200">استراتژی موتور ترجمه:</label>
+                    <label className="text-xs font-bold text-slate-200">نحوه انتخاب و اولویت موتور ترجمه:</label>
                     <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
                       {[
-                        { id: 'gemini_with_fallback', label: 'جمینای با پشتیبان خودکار (توصیه شده)', desc: 'اولویت با جمینای، در صورت اتمام سهمیه سوییچ خودکار' },
-                        { id: 'gemini_only', label: 'فقط جمینای', desc: 'بدون هیچ سوییچی، فقط با کلیدهای گوگل' },
-                        { id: 'openai', label: 'همیشه OpenAI', desc: 'استفاده مستقیم از مدل‌های GPT' },
-                        { id: 'claude', label: 'همیشه Claude', desc: 'استفاده مستقیم از مدل‌های Anthropic' },
-                        { id: 'custom', label: 'همیشه سرویس سفارشی', desc: 'استفاده از آدرس اختصاصی (DeepSeek و...)' },
+                        { id: 'lowest_ping', label: '⚡ کمترین پینگ و سریع‌ترین پاسخ (هوشمند خودکار)', desc: 'سرور پینگ مدل‌ها را سنجیده و همیشه آن هوش مصنوعی که کمترین تاخیر را دارد اولویت اول قرار می‌دهد.' },
+                        { id: 'custom_priority', label: '🎛️ چیدمان و اولویت دلخواه شما (دستی)', desc: 'دقیقاً طبق ترتیبی که در جدول زیر با دکمه‌های بالا/پایین چیده‌اید اجرا می‌شود.' },
+                        { id: 'custom_first', label: '🔵 اولویت اول با سرورهای واسط DeepSeek', desc: 'ابتدا تمام درخواست‌ها با واسط‌های DeepSeek ترجمه می‌شوند و در صورت نیاز به بقیه سوییچ می‌شود.' },
+                        { id: 'gemini_with_fallback', label: '🟢 اولویت با گوگل Gemini', desc: 'اولویت اول با کلیدهای جمنای، در صورت اتمام سهمیه سوییچ خودکار به واسط‌ها و پشتیبان‌ها.' },
+                        { id: 'custom', label: 'فقط سرورهای سفارشی / واسط DeepSeek', desc: 'فقط و فقط با سرورهای واسط بدون سوییچ به گوگل.' },
+                        { id: 'gemini_only', label: 'فقط گوگل Gemini', desc: 'فقط با کلیدهای گوگل جمنای بدون هیچ سوییچی.' },
                       ].map((strat) => (
                         <label
                           key={strat.id}
                           className={`flex items-start gap-2 p-2.5 rounded-xl border cursor-pointer transition-all ${
                             fallbackConfig.providerStrategy === strat.id
-                              ? 'bg-indigo-600/20 border-indigo-500 text-white shadow-sm'
+                              ? 'bg-cyan-600/20 border-cyan-500 text-white shadow-sm'
                               : 'bg-slate-950/60 border-slate-800 text-slate-400 hover:text-slate-200'
                           }`}
                         >
@@ -5105,7 +5158,7 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
                             value={strat.id}
                             checked={fallbackConfig.providerStrategy === strat.id}
                             onChange={() => setFallbackConfig({ ...fallbackConfig, providerStrategy: strat.id as any })}
-                            className="mt-0.5 accent-indigo-500 shrink-0"
+                            className="mt-0.5 accent-cyan-500 shrink-0"
                           />
                           <div className="flex flex-col text-right">
                             <span className="text-xs font-bold text-slate-100">{strat.label}</span>
@@ -5114,6 +5167,177 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
                         </label>
                       ))}
                     </div>
+                  </div>
+                </div>
+
+                {/* Priority Ordering & Live Ping Monitor */}
+                <div className="bg-slate-950/80 border border-slate-800 rounded-2xl p-4 flex flex-col gap-3.5">
+                  <div className="flex items-center justify-between flex-wrap gap-2 pb-2.5 border-b border-slate-800">
+                    <div className="flex items-center gap-2">
+                      <Sliders className="w-4 h-4 text-cyan-400" />
+                      <span className="text-xs sm:text-sm font-bold text-white">
+                        ترتیب اولویت اجرای هوش‌های مصنوعی و سنجش زنده تاخیر (پینگ)
+                      </span>
+                    </div>
+
+                    <button
+                      type="button"
+                      onClick={handleMeasureAllPings}
+                      disabled={isMeasuringPings}
+                      className="px-3 py-1.5 rounded-xl bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-bold shadow-md shadow-cyan-600/20 flex items-center gap-1.5 transition-all cursor-pointer disabled:opacity-50"
+                      title="ارسال درخواست سنجش همزمان به تمامی سرویس‌ها برای محاسبه دقیق پینگ و سرعت"
+                    >
+                      {isMeasuringPings ? (
+                        <>
+                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                          <span>در حال سنجش پینگ مدل‌ها...</span>
+                        </>
+                      ) : (
+                        <>
+                          <Zap className="w-3.5 h-3.5 text-amber-300 fill-amber-300" />
+                          <span>سنجش زنده پینگ و سرعت همه هوش‌ها</span>
+                        </>
+                      )}
+                    </button>
+                  </div>
+
+                  <p className="text-[11px] text-slate-400 leading-relaxed">
+                    با زدن دکمه‌های <strong className="text-white">▲ (بالاتر)</strong> یا <strong className="text-white">▼ (پایین‌تر)</strong> اولویت هر مدل را جابه‌جا کنید. در حالت <strong className="text-cyan-300">«کمترین پینگ (خودکار)»</strong>، سرور اتوماتیک مدلی که کمترین میلی‌ثانیه را داشته باشد در صدر قرار می‌دهد؛ و در حالت <strong className="text-cyan-300">«چیدمان دستی»</strong>، دقیقاً طبق همین فهرست زیر ترجمه انجام می‌شود:
+                  </p>
+
+                  <div className="flex flex-col gap-2">
+                    {providerPriorityOrder.map((provId, index) => {
+                      const isFirst = index === 0;
+                      const isLast = index === providerPriorityOrder.length - 1;
+                      const pingInfo = providerPings[provId];
+
+                      let name = provId;
+                      let badge = provId;
+                      let badgeClass = 'bg-slate-800 text-slate-300 border-slate-700';
+                      let countLabel = '';
+                      let model = '';
+
+                      if (provId === 'custom') {
+                        name = 'سرورهای واسط DeepSeek و پروکسی‌ها';
+                        model = fallbackConfig.customConfig?.model || 'deepseek-chat';
+                        badge = 'DeepSeek / Proxy';
+                        badgeClass = 'bg-cyan-500/20 text-cyan-300 border-cyan-500/30';
+                        countLabel = `${customServersList.length} سرور (${customKeysList.length} کلید فعال)`;
+                      } else if (provId === 'gemini') {
+                        name = 'گوگل Gemini (مدل‌های سری ۳)';
+                        model = 'Gemini 3.1 Flash Lite';
+                        badge = 'Google Gemini';
+                        badgeClass = 'bg-indigo-500/20 text-indigo-300 border-indigo-500/30';
+                        countLabel = `${keysDetails.length} کلید در استخر سرور`;
+                      } else if (provId === 'openai') {
+                        name = 'سرویس OpenAI (GPT)';
+                        model = fallbackConfig.openaiModel || 'gpt-4o-mini';
+                        badge = 'OpenAI GPT';
+                        badgeClass = 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30';
+                        countLabel = `${openaiKeysText.split('\n').filter((k) => k.trim()).length} کلید ثبت‌شده`;
+                      } else if (provId === 'claude') {
+                        name = 'سرویس Anthropic Claude';
+                        model = fallbackConfig.claudeModel || 'claude-3-5-haiku';
+                        badge = 'Anthropic Claude';
+                        badgeClass = 'bg-amber-500/20 text-amber-300 border-amber-500/30';
+                        countLabel = `${claudeKeysText.split('\n').filter((k) => k.trim()).length} کلید ثبت‌شده`;
+                      }
+
+                      return (
+                        <div
+                          key={provId}
+                          className={`p-3 rounded-xl border flex flex-col sm:flex-row sm:items-center justify-between gap-3 transition-all ${
+                            isFirst
+                              ? 'bg-gradient-to-r from-cyan-950/40 to-slate-900 border-cyan-500/50 shadow-sm'
+                              : 'bg-slate-900/80 border-slate-800 hover:border-slate-700'
+                          }`}
+                        >
+                          {/* Rank Badge + Identity */}
+                          <div className="flex items-center gap-3 min-w-0">
+                            <span
+                              className={`w-7 h-7 rounded-lg flex items-center justify-center text-xs font-bold shrink-0 ${
+                                isFirst
+                                  ? 'bg-cyan-500 text-slate-950 shadow-md shadow-cyan-500/30'
+                                  : index === 1
+                                  ? 'bg-indigo-600/60 text-white border border-indigo-400/40'
+                                  : 'bg-slate-800 text-slate-300 border border-slate-700'
+                              }`}
+                            >
+                              #{index + 1}
+                            </span>
+
+                            <div className="flex flex-col min-w-0">
+                              <div className="flex items-center gap-2 flex-wrap">
+                                <span className="font-bold text-white text-xs sm:text-sm">
+                                  {name}
+                                </span>
+                                <span className={`text-[10px] font-bold px-2 py-0.5 rounded-md border ${badgeClass}`}>
+                                  {badge}
+                                </span>
+                                {isFirst && (
+                                  <span className="text-[10px] font-bold px-2 py-0.5 rounded-md bg-amber-500/20 text-amber-300 border border-amber-500/30">
+                                    ★ اولویت اول
+                                  </span>
+                                )}
+                              </div>
+                              <div className="flex items-center gap-2 text-[11px] text-slate-400 mt-0.5">
+                                <span className="font-mono text-slate-300">{model}</span>
+                                <span>•</span>
+                                <span>{countLabel}</span>
+                              </div>
+                            </div>
+                          </div>
+
+                          {/* Ping Status + Move Buttons */}
+                          <div className="flex items-center gap-2.5 shrink-0 self-end sm:self-center">
+                            {/* Latency Pill */}
+                            <div className="flex items-center gap-1.5 bg-slate-950 px-2.5 py-1 rounded-xl border border-slate-800 text-xs font-mono">
+                              <span className="text-slate-400 text-[10px]">پینگ:</span>
+                              {pingInfo && pingInfo.latencyMs < 999999 ? (
+                                <span
+                                  className={`font-bold flex items-center gap-1 ${
+                                    pingInfo.latencyMs < 600
+                                      ? 'text-emerald-400'
+                                      : pingInfo.latencyMs < 1800
+                                      ? 'text-amber-400'
+                                      : 'text-rose-400'
+                                  }`}
+                                >
+                                  <span className={`w-1.5 h-1.5 rounded-full ${
+                                    pingInfo.latencyMs < 600 ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'
+                                  }`}></span>
+                                  <span>{pingInfo.latencyMs} ms</span>
+                                </span>
+                              ) : (
+                                <span className="text-slate-500 text-[10px]">سنجش نشده</span>
+                              )}
+                            </div>
+
+                            {/* Move Up / Down Buttons */}
+                            <div className="flex items-center gap-1 bg-slate-950 p-1 rounded-xl border border-slate-800">
+                              <button
+                                type="button"
+                                onClick={() => handleMovePriority(index, 'up')}
+                                disabled={isFirst}
+                                className="p-1 rounded-lg hover:bg-slate-800 text-slate-300 hover:text-cyan-300 disabled:opacity-30 disabled:hover:text-slate-300 cursor-pointer transition-colors"
+                                title="انتقال به اولویت بالاتر (▲)"
+                              >
+                                <ChevronUp className="w-4 h-4" />
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => handleMovePriority(index, 'down')}
+                                disabled={isLast}
+                                className="p-1 rounded-lg hover:bg-slate-800 text-slate-300 hover:text-cyan-300 disabled:opacity-30 disabled:hover:text-slate-300 cursor-pointer transition-colors"
+                                title="انتقال به اولویت پایین‌تر (▼)"
+                              >
+                                <ChevronDown className="w-4 h-4" />
+                              </button>
+                            </div>
+                          </div>
+                        </div>
+                      );
+                    })}
                   </div>
                 </div>
 

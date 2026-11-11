@@ -73,6 +73,9 @@ import {
   deleteCustomServer,
   getAllCustomKeysFlat,
   CustomServerConfig,
+  setPriorityOrder,
+  getProviderPings,
+  ProviderType,
   ServerSubtitleProject
 } from './src/server/database';
 import {
@@ -90,6 +93,7 @@ import {
   restartFolderFromScratch,
   testServerKey,
   testFallbackProvider,
+  measureAllProvidersLatency,
   resetWorkerExhaustionBackoff,
   pauseAllTranslations,
   resumeAllTranslations,
@@ -2781,11 +2785,12 @@ app.post('/api/server/config', (req, res) => {
   }
 });
 
-// 16a. Fallback AI Providers (OpenAI, Claude, Custom): Get, Update, Test
+// 16a. Fallback AI Providers (OpenAI, Claude, Custom): Get, Update, Test, Priority Order & Ping Measurement
 app.get('/api/server/fallback-providers', (req, res) => {
   try {
     const config = getFallbackAIConfig();
-    return res.json({ success: true, config });
+    const pings = getProviderPings();
+    return res.json({ success: true, config, pings });
   } catch (err: any) {
     return res.status(500).json({ success: false, error: err?.message });
   }
@@ -2793,7 +2798,7 @@ app.get('/api/server/fallback-providers', (req, res) => {
 
 app.post('/api/server/fallback-providers', (req, res) => {
   try {
-    const { openaiKeys, openaiModel, claudeKeys, claudeModel, customConfig, providerStrategy } = req.body || {};
+    const { openaiKeys, openaiModel, claudeKeys, claudeModel, customConfig, providerStrategy, priorityOrder } = req.body || {};
     const updated = updateFallbackAIConfig({
       openaiKeys,
       openaiModel,
@@ -2801,11 +2806,13 @@ app.post('/api/server/fallback-providers', (req, res) => {
       claudeModel,
       customConfig,
       providerStrategy,
+      priorityOrder,
     });
     return res.json({
       success: true,
       config: updated,
-      message: 'تنظیمات هوش‌های مصنوعی پشتیبان (OpenAI, Claude, Custom) با موفقیت ذخیره شد.',
+      pings: getProviderPings(),
+      message: 'تنظیمات و اولویت‌بندی هوش‌های مصنوعی با موفقیت ذخیره شد.',
     });
   } catch (err: any) {
     return res.status(500).json({ success: false, error: err?.message });
@@ -2822,6 +2829,43 @@ app.post('/api/server/fallback-providers/test', async (req, res) => {
     return res.json(result);
   } catch (err: any) {
     return res.status(500).json({ success: false, message: err?.message || 'خطا در تست کلید' });
+  }
+});
+
+app.post('/api/server/fallback-providers/measure-all-pings', async (req, res) => {
+  try {
+    const results = await measureAllProvidersLatency();
+    const config = getFallbackAIConfig();
+    return res.json({
+      success: true,
+      pings: results,
+      config,
+      message: 'سنجش پینگ و زمان پاسخ تمامی ارائه‌دهنده‌ها انجام شد.',
+    });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message });
+  }
+});
+
+app.post('/api/server/fallback-providers/priority-order', (req, res) => {
+  try {
+    const { priorityOrder, providerStrategy } = req.body || {};
+    if (Array.isArray(priorityOrder)) {
+      setPriorityOrder(priorityOrder);
+    }
+    if (providerStrategy) {
+      updateFallbackAIConfig({ providerStrategy });
+    }
+    const config = getFallbackAIConfig();
+    return res.json({
+      success: true,
+      priorityOrder: config.priorityOrder,
+      providerStrategy: config.providerStrategy,
+      pings: getProviderPings(),
+      message: 'ترتیب اولویت هوش‌های مصنوعی بروزرسانی شد.',
+    });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message });
   }
 });
 

@@ -33,6 +33,10 @@ import {
   setProjectPriority,
   clearSystemCacheAndResetStuckQueues,
   isDailyQuotaError,
+  ProviderType,
+  recordProviderPing,
+  getProviderPings,
+  setPriorityOrder,
   ServerSubtitleProject 
 } from './database';
 import { isCueProperlyTranslated } from '../lib/subtitleParser';
@@ -697,26 +701,97 @@ export async function translateBatchWithDedicatedKey(
   tokens: { prompt: number; candidates: number; total: number };
   keyUsed: string;
 }> {
-  // If user selected "Custom Strategy", directly translate via custom servers/DeepSeek
   const fallbackConfig = getFallbackAIConfig();
-  if (fallbackConfig.providerStrategy === 'custom') {
-    const customResult = await translateBatchWithFallbackProviders(
-      items,
-      targetLanguage,
-      tone,
-      customPrompt,
-      context
-    );
-    if (customResult) {
-      return customResult;
+  const strategy = fallbackConfig.providerStrategy || 'lowest_ping';
+  const orderedProviders = getOrderedProviders(strategy, fallbackConfig.priorityOrder);
+
+  let lastError: any = null;
+
+  for (const provider of orderedProviders) {
+    try {
+      if (provider === 'custom') {
+        const res = await translateWithCustomProvider(items, targetLanguage, tone, customPrompt, context);
+        if (res) return res;
+      } else if (provider === 'gemini') {
+        const res = await translateWithGeminiProvider(items, targetLanguage, tone, customPrompt, primaryKey, candidateKeys, context);
+        if (res) return res;
+      } else if (provider === 'openai') {
+        const res = await translateWithOpenAIProvider(items, targetLanguage, tone, customPrompt, context);
+        if (res) return res;
+      } else if (provider === 'claude') {
+        const res = await translateWithClaudeProvider(items, targetLanguage, tone, customPrompt, context);
+        if (res) return res;
+      }
+    } catch (err: any) {
+      lastError = err;
+      console.warn(`[TranslationRouter] Provider «${provider}» failed: ${err?.message || err}. Cascading to next provider...`);
     }
   }
 
+  throw lastError || new Error('خطا در ترجمه بسته پس از بررسی تمامی هوش‌های مصنوعی در صف اولویت.');
+}
+
+/**
+ * Determine the ordered sequence of providers to execute for each batch
+ */
+export function getOrderedProviders(strategy?: string, customOrder?: ProviderType[]): ProviderType[] {
+  const pings = getProviderPings();
+
+  if (strategy === 'custom') {
+    return ['custom'];
+  }
+  if (strategy === 'gemini_only') {
+    return ['gemini'];
+  }
+  if (strategy === 'openai') {
+    return ['openai'];
+  }
+  if (strategy === 'claude') {
+    return ['claude'];
+  }
+  if (strategy === 'custom_first') {
+    return ['custom', 'gemini', 'openai', 'claude'];
+  }
+  if (strategy === 'gemini_with_fallback') {
+    return ['gemini', 'custom', 'openai', 'claude'];
+  }
+  if (strategy === 'custom_priority') {
+    const list: ProviderType[] = customOrder && customOrder.length > 0 ? customOrder : ['custom', 'gemini', 'openai', 'claude'];
+    const full: ProviderType[] = [...list];
+    for (const p of ['custom', 'gemini', 'openai', 'claude'] as ProviderType[]) {
+      if (!full.includes(p)) full.push(p);
+    }
+    return full;
+  }
+
+  // Default: 'lowest_ping' - sort providers by measured response time
+  const all: ProviderType[] = ['custom', 'gemini', 'openai', 'claude'];
+  return all.sort((a, b) => {
+    const pingA = pings[a]?.latencyMs ?? 999999;
+    const pingB = pings[b]?.latencyMs ?? 999999;
+    return pingA - pingB;
+  });
+}
+
+/**
+ * Provider 1: Gemini Translation
+ */
+export async function translateWithGeminiProvider(
+  items: Array<{ id: number; text: string }>,
+  targetLanguage: string,
+  tone?: string,
+  customPrompt?: string,
+  primaryKey?: string,
+  candidateKeys: string[] = [],
+  context?: SubtitlePromptContext
+): Promise<{
+  translations: Array<{ id: number; text: string }>;
+  tokens: { prompt: number; candidates: number; total: number };
+  keyUsed: string;
+} | null> {
   const { systemInstruction, userContent } = buildSubtitlePrompt(items, targetLanguage, tone, customPrompt, context);
-
   const keysQueue = [primaryKey, ...candidateKeys.filter((k) => k !== primaryKey)].filter(Boolean) as string[];
-
-  let lastErr: any = null;
+  if (keysQueue.length === 0) return null;
 
   for (let kIdx = 0; kIdx < keysQueue.length; kIdx++) {
     const currentKey = keysQueue[kIdx];
@@ -724,7 +799,6 @@ export async function translateBatchWithDedicatedKey(
       continue;
     }
 
-    // Strict RPM Pacing: ensure minimum 4.2 seconds elapsed AND within safe 13 RPM limit
     const lastCall = lastKeyCallTime.get(currentKey) || 0;
     const elapsedSinceLastCall = Date.now() - lastCall;
     if (elapsedSinceLastCall < MIN_CALL_GAP_PER_KEY_MS) {
@@ -733,13 +807,11 @@ export async function translateBatchWithDedicatedKey(
     }
     recordKeyCall(currentKey);
 
-    // Cascade models: try active model first, then fallback models if 503 High Demand occurs
     const modelsToAttempt = [activeTranslationModel, PRIMARY_MODEL, ...FALLBACK_MODELS].filter(
       (m, i, arr) => arr.indexOf(m) === i
     );
 
     let keyFailedWithRateOrAuth = false;
-
     const config = getServerConfig();
     const hasProxy = Boolean(config.geminiBaseUrl || process.env.GEMINI_BASE_URL);
     const requestTimeoutMs = hasProxy ? 65000 : 45000;
@@ -747,6 +819,7 @@ export async function translateBatchWithDedicatedKey(
     for (const modelToUse of modelsToAttempt) {
       const controller = new AbortController();
       const timeoutId = setTimeout(() => controller.abort(), requestTimeoutMs);
+      const startTime = Date.now();
 
       try {
         const ai = createGenAI(currentKey);
@@ -757,7 +830,7 @@ export async function translateBatchWithDedicatedKey(
             systemInstruction,
             responseMimeType: 'application/json',
             thinkingConfig: {
-              thinkingBudget: 0, // Disable slow thinking deliberation for sub-second translations
+              thinkingBudget: 0,
             },
             abortSignal: controller.signal,
           },
@@ -767,9 +840,10 @@ export async function translateBatchWithDedicatedKey(
         const rawText = response.text || '';
         const finalTranslations = parseTranslationsJson(rawText, items, targetLanguage);
 
-        // Accept the batch if valid translations returned
         if (finalTranslations.length > 0) {
-          // If we had to switch to a fallback model, register it as current
+          const latencyMs = Date.now() - startTime;
+          recordProviderPing('gemini', latencyMs, true, modelToUse, 'پاسخ موفق');
+
           if (modelToUse !== activeTranslationModel) {
             console.log(`[BackgroundWorker] Fast failover success using model: ${modelToUse}`);
             activeTranslationModel = modelToUse;
@@ -791,15 +865,13 @@ export async function translateBatchWithDedicatedKey(
         }
       } catch (err: any) {
         clearTimeout(timeoutId);
-        lastErr = err;
 
         if (controller.signal.aborted || err?.name === 'AbortError' || String(err).includes('aborted')) {
-          console.warn(`[BackgroundWorker] Request on ${modelToUse} timed out after 15s. Switching model/key immediately...`);
-          continue; // Immediately try next model/key
+          console.warn(`[BackgroundWorker] Request on ${modelToUse} timed out. Switching model/key...`);
+          continue;
         }
 
         const msg = String(err?.message || err);
-
         const is503HighDemand =
           msg.includes('503') ||
           msg.toLowerCase().includes('high demand') ||
@@ -808,7 +880,7 @@ export async function translateBatchWithDedicatedKey(
           msg.includes('404');
 
         if (is503HighDemand) {
-          console.warn(`[BackgroundWorker] Model ${modelToUse} returned 503/Unavailable. Cascading to fallback model on same key...`);
+          console.warn(`[BackgroundWorker] Model ${modelToUse} returned 503. Cascading to fallback model...`);
           continue;
         }
 
@@ -816,10 +888,8 @@ export async function translateBatchWithDedicatedKey(
           msg.includes('401') ||
           msg.toLowerCase().includes('deleted or disabled') ||
           msg.toLowerCase().includes('bound service account') ||
-          msg.toLowerCase().includes('service account is deleted') ||
           msg.toLowerCase().includes('invalid api key') ||
-          msg.toLowerCase().includes('api_key_invalid') ||
-          msg.toLowerCase().includes('key not valid');
+          msg.toLowerCase().includes('api_key_invalid');
 
         const isRateLimit =
           msg.includes('429') ||
@@ -835,31 +905,16 @@ export async function translateBatchWithDedicatedKey(
 
         if (isPermanentlyDisabledKey) {
           markKeyAsDisabled(currentKey, 'سرویس‌اکانت یا کلید گوگل غیرفعال/حذف شده (401)');
-          console.error(`[BackgroundWorker] Key ${currentKey.slice(0, 6)}... is deleted/disabled by Google (401). Permanently removed from pool. Substituting fresh key immediately...`);
           keyFailedWithRateOrAuth = true;
-          const freshPoolKeys = getServerKeys().filter((k) => !isKeyDisabled(k) && !isKeyExhausted(k));
-          for (const fk of freshPoolKeys) {
-            if (!keysQueue.includes(fk)) {
-              keysQueue.push(fk);
-            }
-          }
           break;
         } else if (isRateLimit || isOtherAuth) {
           const isDaily = isDailyQuotaError(msg);
           if (isDaily) {
-            markKeyAsExhausted(currentKey, `اتمام سهمیه روزانه گوگل (Daily Quota): ${msg.slice(0, 100)}`, true);
-            console.warn(`[BackgroundWorker] Key ${currentKey.slice(0, 6)}... DAILY QUOTA EXHAUSTED. Strictly excluded from rotation.`);
+            markKeyAsExhausted(currentKey, `اتمام سهمیه روزانه گوگل: ${msg.slice(0, 100)}`, true);
           } else {
-            markKeyAsExhausted(currentKey, isRateLimit ? 'محدودیت موقت دقیقه (429 RPM)' : 'عدم دسترسی (403)', false);
-            console.warn(`[BackgroundWorker] Key ${currentKey.slice(0, 6)}... RPM limit hit (429). Shifted to pool back.`);
+            markKeyAsExhausted(currentKey, isRateLimit ? 'محدودیت موقت دقیقه (429)' : 'عدم دسترسی (403)', false);
           }
           keyFailedWithRateOrAuth = true;
-          const freshPoolKeys = getServerKeys().filter((k) => !isKeyDisabled(k) && !isKeyExhausted(k));
-          for (const fk of freshPoolKeys) {
-            if (!keysQueue.includes(fk)) {
-              keysQueue.push(fk);
-            }
-          }
           break;
         } else {
           console.warn(`[BackgroundWorker] Non-rate-limit error on model ${modelToUse}: ${msg.slice(0, 120)}`);
@@ -873,27 +928,13 @@ export async function translateBatchWithDedicatedKey(
     }
   }
 
-  // Before failing: Check if secondary Fallback AI (OpenAI, Claude, Custom Provider) can rescue this batch!
-  const fallbackResult = await translateBatchWithFallbackProviders(
-    items,
-    targetLanguage,
-    tone,
-    customPrompt,
-    context
-  );
-  if (fallbackResult) {
-    return fallbackResult;
-  }
-
-  throw lastErr || new Error('خطا در ترجمه بسته پس از بررسی تمام کلیدهای فعال و مدل‌های کمکی.');
+  return null;
 }
 
 /**
- * Secondary AI Provider Fallback (OpenAI GPT-4o-mini, Anthropic Claude 3.5, and Custom Provider)
- * Activated automatically when all Gemini keys are in daily/RPM quota exhaustion,
- * ensuring continuous translation without queue stalls!
+ * Provider 2: Multiple Custom AI Servers (DeepSeek / OneAPI / OpenRouter)
  */
-export async function translateBatchWithFallbackProviders(
+export async function translateWithCustomProvider(
   items: Array<{ id: number; text: string }>,
   targetLanguage: string,
   tone?: string,
@@ -905,119 +946,6 @@ export async function translateBatchWithFallbackProviders(
   keyUsed: string;
 } | null> {
   const fallbackConfig = getFallbackAIConfig();
-  if (fallbackConfig.providerStrategy === 'gemini_only') {
-    return null;
-  }
-
-  const { systemInstruction, userContent } = buildSubtitlePrompt(items, targetLanguage, tone, customPrompt, context);
-
-  // 1. Try OpenAI if keys configured
-  if (Array.isArray(fallbackConfig.openaiKeys) && fallbackConfig.openaiKeys.length > 0) {
-    for (const key of fallbackConfig.openaiKeys) {
-      if (!key?.trim()) continue;
-      try {
-        const model = fallbackConfig.openaiModel || 'gpt-4o-mini';
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 20000);
-        const res = await fetch('https://api.openai.com/v1/chat/completions', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${key.trim()}`,
-          },
-          body: JSON.stringify({
-            model,
-            messages: [
-              { role: 'system', content: systemInstruction },
-              { role: 'user', content: userContent },
-            ],
-            response_format: { type: 'json_object' },
-            temperature: 0.3,
-          }),
-          signal: controller.signal,
-        });
-        clearTimeout(timeoutId);
-
-        if (res.ok) {
-          const data = await res.json();
-          const content = data.choices?.[0]?.message?.content || '';
-          const parsed = parseTranslationsJson(content, items, targetLanguage);
-          if (parsed.length > 0) {
-            console.log(`[FallbackAI] Successfully translated batch via OpenAI (${model})`);
-            return {
-              translations: parsed,
-              tokens: {
-                prompt: data.usage?.prompt_tokens || 0,
-                candidates: data.usage?.completion_tokens || 0,
-                total: data.usage?.total_tokens || 0,
-              },
-              keyUsed: `OpenAI:${key.slice(0, 6)}...`,
-            };
-          }
-        } else {
-          const errBody = await res.text().catch(() => '');
-          console.warn(`[FallbackAI] OpenAI HTTP ${res.status}: ${errBody.slice(0, 100)}`);
-        }
-      } catch (err: any) {
-        console.warn(`[FallbackAI] OpenAI error: ${err?.message || err}`);
-      }
-    }
-  }
-
-  // 2. Try Anthropic Claude if keys configured
-  if (Array.isArray(fallbackConfig.claudeKeys) && fallbackConfig.claudeKeys.length > 0) {
-    for (const key of fallbackConfig.claudeKeys) {
-      if (!key?.trim()) continue;
-      try {
-        const model = fallbackConfig.claudeModel || 'claude-3-5-haiku-20241022';
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 20000);
-        const res = await fetch('https://api.anthropic.com/v1/messages', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'x-api-key': key.trim(),
-            'anthropic-version': '2023-06-01',
-          },
-          body: JSON.stringify({
-            model,
-            max_tokens: 4096,
-            system: systemInstruction,
-            messages: [{ role: 'user', content: userContent }],
-            temperature: 0.3,
-          }),
-          signal: controller.signal,
-        });
-        clearTimeout(timeoutId);
-
-        if (res.ok) {
-          const data = await res.json();
-          const content = data.content?.[0]?.text || '';
-          const parsed = parseTranslationsJson(content, items, targetLanguage);
-          if (parsed.length > 0) {
-            console.log(`[FallbackAI] Successfully translated batch via Claude (${model})`);
-            return {
-              translations: parsed,
-              tokens: {
-                prompt: data.usage?.input_tokens || 0,
-                candidates: data.usage?.output_tokens || 0,
-                total: (data.usage?.input_tokens || 0) + (data.usage?.output_tokens || 0),
-              },
-              keyUsed: `Claude:${key.slice(0, 6)}...`,
-            };
-          }
-        } else {
-          const errBody = await res.text().catch(() => '');
-          console.warn(`[FallbackAI] Claude HTTP ${res.status}: ${errBody.slice(0, 100)}`);
-        }
-      } catch (err: any) {
-        console.warn(`[FallbackAI] Claude error: ${err?.message || err}`);
-      }
-    }
-  }
-
-  // 3. Try Multiple Custom Providers & DeepSeek Proxy Brokers
-  // Supports multiple custom servers, multiple keys per server, and large broker latencies (up to 90s)
   const customServers = getCustomServers().filter((s) => s.isEnabled !== false);
   const allServers = [...customServers];
 
@@ -1038,6 +966,10 @@ export async function translateBatchWithFallbackProviders(
     }
   }
 
+  if (allServers.length === 0) return null;
+
+  const { systemInstruction, userContent } = buildSubtitlePrompt(items, targetLanguage, tone, customPrompt, context);
+
   for (const srv of allServers) {
     if (!srv.baseUrl) continue;
     const keys = Array.isArray(srv.apiKeys) && srv.apiKeys.length > 0
@@ -1046,14 +978,14 @@ export async function translateBatchWithFallbackProviders(
 
     for (const key of keys) {
       if (!key || !key.trim()) continue;
+      const startTime = Date.now();
       try {
         const baseUrl = srv.baseUrl.replace(/\/+$/, '');
         const url = baseUrl.endsWith('/chat/completions') ? baseUrl : `${baseUrl}/chat/completions`;
         const controller = new AbortController();
-        // Generous 90s timeout for intermediate broker proxies with high queuing latency
         const timeoutId = setTimeout(() => controller.abort(), 90000);
 
-        console.log(`[CustomAI] Dispatching batch (${items.length} cues) to ${srv.name} (${srv.model}) via proxy... waiting for response.`);
+        console.log(`[CustomAI] Dispatching batch (${items.length} cues) to ${srv.name} (${srv.model})...`);
         const res = await fetch(url, {
           method: 'POST',
           headers: {
@@ -1077,7 +1009,9 @@ export async function translateBatchWithFallbackProviders(
           const content = data.choices?.[0]?.message?.content || '';
           const parsed = parseTranslationsJson(content, items, targetLanguage);
           if (parsed.length > 0) {
-            console.log(`[CustomAI] Successfully received & verified translation from ${srv.name} (${srv.model})`);
+            const latencyMs = Date.now() - startTime;
+            recordProviderPing('custom', latencyMs, true, srv.model, `پاسخ موفق از ${srv.name}`);
+
             const promptTok = data.usage?.prompt_tokens || 0;
             const compTok = data.usage?.completion_tokens || 0;
             const totalTok = data.usage?.total_tokens || (promptTok + compTok);
@@ -1094,12 +1028,7 @@ export async function translateBatchWithFallbackProviders(
               },
               keyUsed: `${srv.name}:${key.slice(0, 6)}...`,
             };
-          } else {
-            console.warn(`[CustomAI] Response from ${srv.name} did not contain valid translation JSON.`);
           }
-        } else {
-          const errBody = await res.text().catch(() => '');
-          console.warn(`[CustomAI] ${srv.name} HTTP ${res.status}: ${errBody.slice(0, 120)}`);
         }
       } catch (err: any) {
         console.warn(`[CustomAI] ${srv.name} error: ${err?.message || err}`);
@@ -1107,6 +1036,277 @@ export async function translateBatchWithFallbackProviders(
     }
   }
 
+  return null;
+}
+
+/**
+ * Provider 3: OpenAI (GPT-4o-mini, GPT-4o)
+ */
+export async function translateWithOpenAIProvider(
+  items: Array<{ id: number; text: string }>,
+  targetLanguage: string,
+  tone?: string,
+  customPrompt?: string,
+  context?: SubtitlePromptContext
+): Promise<{
+  translations: Array<{ id: number; text: string }>;
+  tokens: { prompt: number; candidates: number; total: number };
+  keyUsed: string;
+} | null> {
+  const fallbackConfig = getFallbackAIConfig();
+  if (!Array.isArray(fallbackConfig.openaiKeys) || fallbackConfig.openaiKeys.length === 0) {
+    return null;
+  }
+
+  const { systemInstruction, userContent } = buildSubtitlePrompt(items, targetLanguage, tone, customPrompt, context);
+
+  for (const key of fallbackConfig.openaiKeys) {
+    if (!key?.trim()) continue;
+    const startTime = Date.now();
+    try {
+      const model = fallbackConfig.openaiModel || 'gpt-4o-mini';
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 30000);
+
+      const res = await fetch('https://api.openai.com/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${key.trim()}`,
+        },
+        body: JSON.stringify({
+          model,
+          messages: [
+            { role: 'system', content: systemInstruction },
+            { role: 'user', content: userContent },
+          ],
+          response_format: { type: 'json_object' },
+          temperature: 0.3,
+        }),
+        signal: controller.signal,
+      });
+      clearTimeout(timeoutId);
+
+      if (res.ok) {
+        const data = await res.json();
+        const content = data.choices?.[0]?.message?.content || '';
+        const parsed = parseTranslationsJson(content, items, targetLanguage);
+        if (parsed.length > 0) {
+          const latencyMs = Date.now() - startTime;
+          recordProviderPing('openai', latencyMs, true, model, 'پاسخ موفق از OpenAI');
+
+          return {
+            translations: parsed,
+            tokens: {
+              prompt: data.usage?.prompt_tokens || 0,
+              candidates: data.usage?.completion_tokens || 0,
+              total: data.usage?.total_tokens || 0,
+            },
+            keyUsed: `OpenAI:${key.slice(0, 6)}...`,
+          };
+        }
+      }
+    } catch (err: any) {
+      console.warn(`[FallbackAI] OpenAI error: ${err?.message || err}`);
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Provider 4: Anthropic Claude (Claude 3.5 Haiku / Sonnet)
+ */
+export async function translateWithClaudeProvider(
+  items: Array<{ id: number; text: string }>,
+  targetLanguage: string,
+  tone?: string,
+  customPrompt?: string,
+  context?: SubtitlePromptContext
+): Promise<{
+  translations: Array<{ id: number; text: string }>;
+  tokens: { prompt: number; candidates: number; total: number };
+  keyUsed: string;
+} | null> {
+  const fallbackConfig = getFallbackAIConfig();
+  if (!Array.isArray(fallbackConfig.claudeKeys) || fallbackConfig.claudeKeys.length === 0) {
+    return null;
+  }
+
+  const { systemInstruction, userContent } = buildSubtitlePrompt(items, targetLanguage, tone, customPrompt, context);
+
+  for (const key of fallbackConfig.claudeKeys) {
+    if (!key?.trim()) continue;
+    const startTime = Date.now();
+    try {
+      const model = fallbackConfig.claudeModel || 'claude-3-5-haiku-20241022';
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), 30000);
+
+      const res = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': key.trim(),
+          'anthropic-version': '2023-06-01',
+        },
+        body: JSON.stringify({
+          model,
+          max_tokens: 4096,
+          system: systemInstruction,
+          messages: [{ role: 'user', content: userContent }],
+          temperature: 0.3,
+        }),
+        signal: controller.signal,
+      });
+      clearTimeout(timeoutId);
+
+      if (res.ok) {
+        const data = await res.json();
+        const content = data.content?.[0]?.text || '';
+        const parsed = parseTranslationsJson(content, items, targetLanguage);
+        if (parsed.length > 0) {
+          const latencyMs = Date.now() - startTime;
+          recordProviderPing('claude', latencyMs, true, model, 'پاسخ موفق از Claude');
+
+          return {
+            translations: parsed,
+            tokens: {
+              prompt: data.usage?.input_tokens || 0,
+              candidates: data.usage?.output_tokens || 0,
+              total: (data.usage?.input_tokens || 0) + (data.usage?.output_tokens || 0),
+            },
+            keyUsed: `Claude:${key.slice(0, 6)}...`,
+          };
+        }
+      }
+    } catch (err: any) {
+      console.warn(`[FallbackAI] Claude error: ${err?.message || err}`);
+    }
+  }
+
+  return null;
+}
+
+/**
+ * Measure real-time latency (ping) for all configured providers
+ */
+export async function measureAllProvidersLatency(): Promise<Record<ProviderType, {
+  latencyMs: number;
+  isAvailable: boolean;
+  message: string;
+}>> {
+  const fallbackConfig = getFallbackAIConfig();
+  const serverKeys = getServerKeys();
+  const customServers = getCustomServers().filter((s) => s.isEnabled !== false);
+
+  const results: Record<ProviderType, { latencyMs: number; isAvailable: boolean; message: string }> = {
+    custom: { latencyMs: 999999, isAvailable: false, message: 'هنوز تنظیمی انجام نشده' },
+    gemini: { latencyMs: 999999, isAvailable: false, message: 'کلید فعال یافت نشد' },
+    openai: { latencyMs: 999999, isAvailable: false, message: 'کلید تنظیم نشده' },
+    claude: { latencyMs: 999999, isAvailable: false, message: 'کلید تنظیم نشده' },
+  };
+
+  // Test Custom / DeepSeek proxy
+  const customServer = customServers[0] || (fallbackConfig.customConfig?.baseUrl && fallbackConfig.customConfig?.apiKey ? {
+    id: 'legacy',
+    name: 'سرویس سفارشی',
+    baseUrl: fallbackConfig.customConfig.baseUrl,
+    apiKey: fallbackConfig.customConfig.apiKey,
+    apiKeys: [fallbackConfig.customConfig.apiKey],
+    model: fallbackConfig.customConfig.model || 'deepseek-chat',
+  } : null);
+
+  const customKey = customServer?.apiKey || (customServer?.apiKeys && customServer.apiKeys[0]);
+  if (customServer?.baseUrl && customKey) {
+    const res = await testFallbackProvider('custom', customKey, {
+      baseUrl: customServer.baseUrl,
+      model: customServer.model,
+    });
+    results.custom = {
+      latencyMs: res.latencyMs,
+      isAvailable: res.success,
+      message: res.message,
+    };
+    recordProviderPing('custom', res.latencyMs, res.success, customServer.model, res.message);
+  }
+
+  // Test Gemini
+  const activeGeminiKey = serverKeys.find((k) => !isKeyDisabled(k) && !isKeyExhausted(k)) || serverKeys[0];
+  if (activeGeminiKey) {
+    const start = Date.now();
+    try {
+      const ai = createGenAI(activeGeminiKey);
+      const response = await ai.models.generateContent({
+        model: activeTranslationModel || PRIMARY_MODEL,
+        contents: 'ping',
+        config: { maxOutputTokens: 5 },
+      });
+      const latencyMs = Date.now() - start;
+      results.gemini = {
+        latencyMs,
+        isAvailable: Boolean(response.text),
+        message: `اتصال موفق به Gemini (${latencyMs}ms)`,
+      };
+      recordProviderPing('gemini', latencyMs, true, activeTranslationModel || PRIMARY_MODEL, 'پاسخ موفق');
+    } catch (err: any) {
+      const latencyMs = Date.now() - start;
+      results.gemini = {
+        latencyMs,
+        isAvailable: false,
+        message: err?.message || 'خطا در ارتباط با Gemini',
+      };
+      recordProviderPing('gemini', latencyMs, false, undefined, err?.message);
+    }
+  }
+
+  // Test OpenAI if configured
+  if (fallbackConfig.openaiKeys && fallbackConfig.openaiKeys.length > 0) {
+    const key = fallbackConfig.openaiKeys[0];
+    const res = await testFallbackProvider('openai', key, { model: fallbackConfig.openaiModel });
+    results.openai = {
+      latencyMs: res.latencyMs,
+      isAvailable: res.success,
+      message: res.message,
+    };
+    recordProviderPing('openai', res.latencyMs, res.success, fallbackConfig.openaiModel, res.message);
+  }
+
+  // Test Claude if configured
+  if (fallbackConfig.claudeKeys && fallbackConfig.claudeKeys.length > 0) {
+    const key = fallbackConfig.claudeKeys[0];
+    const res = await testFallbackProvider('claude', key, { model: fallbackConfig.claudeModel });
+    results.claude = {
+      latencyMs: res.latencyMs,
+      isAvailable: res.success,
+      message: res.message,
+    };
+    recordProviderPing('claude', res.latencyMs, res.success, fallbackConfig.claudeModel, res.message);
+  }
+
+  return results;
+}
+
+/**
+ * Backward compatibility fallback wrapper
+ */
+export async function translateBatchWithFallbackProviders(
+  items: Array<{ id: number; text: string }>,
+  targetLanguage: string,
+  tone?: string,
+  customPrompt?: string,
+  context?: SubtitlePromptContext
+): Promise<{
+  translations: Array<{ id: number; text: string }>;
+  tokens: { prompt: number; candidates: number; total: number };
+  keyUsed: string;
+} | null> {
+  const custom = await translateWithCustomProvider(items, targetLanguage, tone, customPrompt, context);
+  if (custom) return custom;
+  const oai = await translateWithOpenAIProvider(items, targetLanguage, tone, customPrompt, context);
+  if (oai) return oai;
+  const claude = await translateWithClaudeProvider(items, targetLanguage, tone, customPrompt, context);
+  if (claude) return claude;
   return null;
 }
 

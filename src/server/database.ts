@@ -78,6 +78,17 @@ export interface CustomServerConfig {
   tokensCount?: number;
 }
 
+export type ProviderType = 'custom' | 'gemini' | 'openai' | 'claude';
+
+export interface ProviderPingRecord {
+  provider: ProviderType;
+  latencyMs: number;
+  lastCheckedAt: string;
+  isAvailable: boolean;
+  model?: string;
+  note?: string;
+}
+
 export interface FallbackAIConfig {
   openaiKeys: string[];
   openaiModel: string; // e.g. 'gpt-4o-mini'
@@ -90,7 +101,17 @@ export interface FallbackAIConfig {
     name?: string;
   };
   customServers?: CustomServerConfig[];
-  providerStrategy: 'gemini_with_fallback' | 'gemini_only' | 'openai' | 'claude' | 'custom';
+  providerStrategy:
+    | 'lowest_ping'
+    | 'custom_priority'
+    | 'custom_first'
+    | 'gemini_with_fallback'
+    | 'gemini_only'
+    | 'openai'
+    | 'claude'
+    | 'custom';
+  priorityOrder?: ProviderType[]; // Ordered list of providers (e.g. ['custom', 'gemini', 'openai', 'claude'])
+  providerLatencies?: Record<string, ProviderPingRecord>;
 }
 
 export interface SubtitlesDatabase {
@@ -133,7 +154,10 @@ export const DEFAULT_FALLBACK_AI_CONFIG: FallbackAIConfig = {
     model: 'deepseek-chat',
     name: 'سرویس سفارشی',
   },
-  providerStrategy: 'gemini_with_fallback', // Gemini is primary, auto-fallback to OpenAI/Claude if Gemini daily quota runs out
+  customServers: [],
+  providerStrategy: 'lowest_ping', // Default: Lowest Ping / Fastest response
+  priorityOrder: ['custom', 'gemini', 'openai', 'claude'], // DeepSeek/Custom is first by default
+  providerLatencies: {},
 };
 
 const DEFAULT_SERVER_CONFIG: ServerConfig = {
@@ -196,6 +220,16 @@ function loadDatabaseFromDisk(): SubtitlesDatabase {
     }
     if (!parsed.customServers || !Array.isArray(parsed.customServers)) {
       parsed.customServers = [];
+    }
+    if (!parsed.fallbackAiConfig) {
+      parsed.fallbackAiConfig = { ...DEFAULT_FALLBACK_AI_CONFIG };
+    } else {
+      if (!parsed.fallbackAiConfig.priorityOrder || !Array.isArray(parsed.fallbackAiConfig.priorityOrder)) {
+        parsed.fallbackAiConfig.priorityOrder = ['custom', 'gemini', 'openai', 'claude'];
+      }
+      if (!parsed.fallbackAiConfig.providerLatencies) {
+        parsed.fallbackAiConfig.providerLatencies = {};
+      }
     }
     if (!parsed.serverConfig) {
       parsed.serverConfig = { ...DEFAULT_SERVER_CONFIG };
@@ -598,8 +632,55 @@ export function updateFallbackAIConfig(updates: Partial<FallbackAIConfig>): Fall
   if (updates.providerStrategy !== undefined) {
     db.fallbackAiConfig.providerStrategy = updates.providerStrategy;
   }
+  if (updates.priorityOrder !== undefined && Array.isArray(updates.priorityOrder)) {
+    db.fallbackAiConfig.priorityOrder = updates.priorityOrder;
+  }
+  if (updates.providerLatencies !== undefined) {
+    db.fallbackAiConfig.providerLatencies = {
+      ...(db.fallbackAiConfig.providerLatencies || {}),
+      ...updates.providerLatencies,
+    };
+  }
   saveDatabaseSync();
   return db.fallbackAiConfig;
+}
+
+export function recordProviderPing(
+  provider: ProviderType,
+  latencyMs: number,
+  isAvailable = true,
+  model?: string,
+  note?: string
+): ProviderPingRecord {
+  const db = getDatabase();
+  if (!db.fallbackAiConfig) db.fallbackAiConfig = { ...DEFAULT_FALLBACK_AI_CONFIG };
+  if (!db.fallbackAiConfig.providerLatencies) db.fallbackAiConfig.providerLatencies = {};
+
+  const record: ProviderPingRecord = {
+    provider,
+    latencyMs: Math.max(1, Math.round(latencyMs)),
+    lastCheckedAt: new Date().toISOString(),
+    isAvailable,
+    model,
+    note,
+  };
+
+  db.fallbackAiConfig.providerLatencies[provider] = record;
+  saveDatabaseSync();
+  return record;
+}
+
+export function getProviderPings(): Record<string, ProviderPingRecord> {
+  const db = getDatabase();
+  return db.fallbackAiConfig?.providerLatencies || {};
+}
+
+export function setPriorityOrder(order: ProviderType[]): ProviderType[] {
+  const db = getDatabase();
+  if (!db.fallbackAiConfig) db.fallbackAiConfig = { ...DEFAULT_FALLBACK_AI_CONFIG };
+  db.fallbackAiConfig.priorityOrder = order;
+  saveDatabaseSync();
+  return order;
 }
 
 export function setOpenAiKeys(keys: string[]): string[] {
