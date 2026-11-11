@@ -50,9 +50,13 @@ import { SubtitleItem } from '../types';
 // Primary & Fallback Models hierarchy:
 // Strictly Gemini 3 series ONLY. NO series 2 models!
 // Official Google Gemini 3.1 Flash Lite as primary ultra-speed engine, with Gemini Flash Latest and Gemini 3.8 Flash as fallbacks.
-export const PRIMARY_MODEL = 'gemini-3.1-flash-lite';
+export const PRIMARY_MODEL = 'gemini-3.5-flash-lite';
 export const FALLBACK_MODELS = [
+  'gemini-3.5-flash-lite',
+  'gemini-3.7-flash',
   'gemini-3.1-flash-lite',
+  'gemini-2.5-flash',
+  'gemini-2.5-flash-lite',
   'gemini-flash-latest',
   'gemini-3.8-flash'
 ];

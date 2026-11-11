@@ -284,26 +284,37 @@ export function getDatabase(): SubtitlesDatabase {
   return inMemoryDb;
 }
 
+let isDiskSaving = false;
+let hasPendingDiskSave = false;
+
 export function saveDatabaseSync(): void {
   if (!inMemoryDb) return;
+  if (isDiskSaving) {
+    hasPendingDiskSave = true;
+    return;
+  }
+  isDiskSaving = true;
   ensureDataDir();
   try {
     const serialized = JSON.stringify(inMemoryDb);
-    fs.writeFileSync(DB_TMP_FILE, serialized, 'utf-8');
-    fs.renameSync(DB_TMP_FILE, DB_FILE);
+    fs.writeFile(DB_TMP_FILE, serialized, 'utf-8', (err) => {
+      if (!err) {
+        try { fs.renameSync(DB_TMP_FILE, DB_FILE); } catch {}
+      }
+      isDiskSaving = false;
+      if (hasPendingDiskSave) {
+        hasPendingDiskSave = false;
+        setTimeout(() => saveDatabaseSync(), 250);
+      }
+    });
   } catch (err) {
-    console.error('[DB] Error saving database synchronously:', err);
+    isDiskSaving = false;
+    console.error('[DB] Error saving database:', err);
   }
 }
 
 export function scheduleSaveDatabase(): void {
-  if (saveDebounceTimer) {
-    clearTimeout(saveDebounceTimer);
-  }
-  saveDebounceTimer = setTimeout(() => {
-    saveDatabaseSync();
-    saveDebounceTimer = null;
-  }, 1000);
+  saveDatabaseSync();
 }
 
 // ─── Folder Operations ────────────────────────────────────────────────────────
