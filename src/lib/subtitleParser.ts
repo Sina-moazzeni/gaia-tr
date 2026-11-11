@@ -775,35 +775,29 @@ export function exportSubtitleFile(
 }
 
 export function normalizeTimestampSRT(ts?: string, sec?: number): string {
-  if (ts && /^\d{1,2}:\d{2}:\d{2}[.,]\d{2,3}$/.test(ts.trim())) {
-    const clean = ts.trim().replace('.', ',');
-    const parts = clean.split(/[:,]/);
-    if (parts.length === 4) {
-      const h = parts[0].padStart(2, '0');
-      const m = parts[1].padStart(2, '0');
-      const s = parts[2].padStart(2, '0');
-      const ms = parts[3].padEnd(3, '0').slice(0, 3);
-      return `${h}:${m}:${s},${ms}`;
+  if (ts && ts.trim()) {
+    const s = timestampToSeconds(ts);
+    if (isFinite(s) && s >= 0) {
+      return secondsToSRT(s);
     }
-    return clean;
   }
-  return secondsToSRT(sec ?? 0);
+  if (typeof sec === 'number' && isFinite(sec) && sec >= 0) {
+    return secondsToSRT(sec);
+  }
+  return '00:00:00,000';
 }
 
 export function normalizeTimestampVTT(ts?: string, sec?: number): string {
-  if (ts && /^\d{1,2}:\d{2}:\d{2}[.,]\d{2,3}$/.test(ts.trim())) {
-    const clean = ts.trim().replace(',', '.');
-    const parts = clean.split(/[:.]/);
-    if (parts.length === 4) {
-      const h = parts[0].padStart(2, '0');
-      const m = parts[1].padStart(2, '0');
-      const s = parts[2].padStart(2, '0');
-      const ms = parts[3].padEnd(3, '0').slice(0, 3);
-      return `${h}:${m}:${s}.${ms}`;
+  if (ts && ts.trim()) {
+    const s = timestampToSeconds(ts);
+    if (isFinite(s) && s >= 0) {
+      return secondsToVTT(s);
     }
-    return clean;
   }
-  return secondsToVTT(sec ?? 0);
+  if (typeof sec === 'number' && isFinite(sec) && sec >= 0) {
+    return secondsToVTT(sec);
+  }
+  return '00:00:00.000';
 }
 
 function exportSRT(items: SubtitleItem[]): string {

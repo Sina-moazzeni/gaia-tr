@@ -24,7 +24,10 @@ import {
   getServerConfig,
   getFallbackAIConfig,
   FallbackAIConfig,
+  getCustomServers,
+  CustomServerConfig,
   resetProjectTranslation,
+  resetFolderTranslationFromScratch,
   recordKeyUsage,
   retryDisruptedAndIncompleteProjects,
   setProjectPriority,
@@ -51,6 +54,14 @@ let lastPrimaryProbeTimestamp = 0;
 const PROBE_PRIMARY_COOLDOWN_MS = 10 * 60 * 1000; // Check every 10 minutes
 
 export function getActiveTranslationModel(): string {
+  return activeTranslationModel;
+}
+
+export function setActiveTranslationModel(model: string): string {
+  if (model && typeof model === 'string' && model.trim()) {
+    activeTranslationModel = model.trim();
+    console.log(`[BackgroundWorker] Active translation model set to: ${activeTranslationModel}`);
+  }
   return activeTranslationModel;
 }
 
@@ -240,13 +251,6 @@ const COMMON_WORD_MAP: Record<string, string> = {
   end: 'پایان',
 };
 
-const LATIN_TO_PERSIAN_CHAR_MAP: Record<string, string> = {
-  a: 'ا', b: 'ب', c: 'ک', d: 'د', e: 'ای', f: 'ف', g: 'گ', h: 'ه',
-  i: 'ای', j: 'ج', k: 'ک', l: 'ل', m: 'م', n: 'ن', o: 'او', p: 'پ',
-  q: 'ق', r: 'ر', s: 'س', t: 'ت', u: 'یو', v: 'و', w: 'و', x: 'اکس',
-  y: 'ی', z: 'ز',
-};
-
 export function resolveStubbornEnglishCue(original: string, candidate: string): string {
   const clean = (candidate || original || '').trim();
   const lower = clean.toLowerCase().replace(/[^a-z0-9]/g, '');
@@ -260,25 +264,8 @@ export function resolveStubbornEnglishCue(original: string, candidate: string): 
     return candidate.trim();
   }
 
-  const words = clean.split(/\s+/).map((word) => {
-    const wLower = word.toLowerCase().replace(/[^a-z0-9]/g, '');
-    if (COMMON_WORD_MAP[wLower]) return COMMON_WORD_MAP[wLower];
-    if (/^\d+$/.test(wLower)) return word;
-    // Transliterate English chars to Persian
-    const tr = word
-      .toLowerCase()
-      .split('')
-      .map((ch) => LATIN_TO_PERSIAN_CHAR_MAP[ch] || ch)
-      .join('');
-    return tr;
-  });
-
-  let result = words.join(' ').trim();
-  // Ensure that it has at least one Persian character so that isCueProperlyTranslated never rejects it
-  if (!/[\u0600-\u06FF]/.test(result)) {
-    result = `${result} (فارسی)`;
-  }
-  return result || 'بله';
+  // Never generate character-by-character phonetic transliterations into gibberish
+  return '';
 }
 
 export interface ActiveProjectSummary {
@@ -685,9 +672,10 @@ export function parseTranslationsJson(
     const soundFix = autoTranslateSoundEffect(it.text);
     const candidate = rawTranslated?.trim() || soundFix || '';
     const isValid = candidate.length > 0 && isCueProperlyTranslated(it.text, candidate, targetLanguage);
+    const hasPersian = candidate && /[\u0600-\u06FF]/.test(candidate);
     return {
       id: it.id,
-      text: isValid ? candidate : (soundFix || candidate || resolveStubbornEnglishCue(it.text, '') || it.text),
+      text: isValid ? candidate : (soundFix || (hasPersian ? candidate : '')),
     };
   });
 }
@@ -709,6 +697,21 @@ export async function translateBatchWithDedicatedKey(
   tokens: { prompt: number; candidates: number; total: number };
   keyUsed: string;
 }> {
+  // If user selected "Custom Strategy", directly translate via custom servers/DeepSeek
+  const fallbackConfig = getFallbackAIConfig();
+  if (fallbackConfig.providerStrategy === 'custom') {
+    const customResult = await translateBatchWithFallbackProviders(
+      items,
+      targetLanguage,
+      tone,
+      customPrompt,
+      context
+    );
+    if (customResult) {
+      return customResult;
+    }
+  }
+
   const { systemInstruction, userContent } = buildSubtitlePrompt(items, targetLanguage, tone, customPrompt, context);
 
   const keysQueue = [primaryKey, ...candidateKeys.filter((k) => k !== primaryKey)].filter(Boolean) as string[];
@@ -737,9 +740,13 @@ export async function translateBatchWithDedicatedKey(
 
     let keyFailedWithRateOrAuth = false;
 
+    const config = getServerConfig();
+    const hasProxy = Boolean(config.geminiBaseUrl || process.env.GEMINI_BASE_URL);
+    const requestTimeoutMs = hasProxy ? 65000 : 45000;
+
     for (const modelToUse of modelsToAttempt) {
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 15000); // Strict 15s timeout prevents any hanging request
+      const timeoutId = setTimeout(() => controller.abort(), requestTimeoutMs);
 
       try {
         const ai = createGenAI(currentKey);
@@ -1009,51 +1016,94 @@ export async function translateBatchWithFallbackProviders(
     }
   }
 
-  // 3. Try Custom Provider if configured
-  if (fallbackConfig.customConfig?.baseUrl && fallbackConfig.customConfig?.apiKey) {
-    try {
-      const cfg = fallbackConfig.customConfig;
-      const baseUrl = cfg.baseUrl.replace(/\/+$/, '');
-      const url = baseUrl.endsWith('/chat/completions') ? baseUrl : `${baseUrl}/chat/completions`;
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 20000);
-      const res = await fetch(url, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${cfg.apiKey.trim()}`,
-        },
-        body: JSON.stringify({
-          model: cfg.model || 'deepseek-chat',
-          messages: [
-            { role: 'system', content: systemInstruction },
-            { role: 'user', content: userContent },
-          ],
-          temperature: 0.3,
-        }),
-        signal: controller.signal,
-      });
-      clearTimeout(timeoutId);
+  // 3. Try Multiple Custom Providers & DeepSeek Proxy Brokers
+  // Supports multiple custom servers, multiple keys per server, and large broker latencies (up to 90s)
+  const customServers = getCustomServers().filter((s) => s.isEnabled !== false);
+  const allServers = [...customServers];
 
-      if (res.ok) {
-        const data = await res.json();
-        const content = data.choices?.[0]?.message?.content || '';
-        const parsed = parseTranslationsJson(content, items, targetLanguage);
-        if (parsed.length > 0) {
-          console.log(`[FallbackAI] Successfully translated batch via Custom Provider (${cfg.name || cfg.model})`);
-          return {
-            translations: parsed,
-            tokens: {
-              prompt: data.usage?.prompt_tokens || 0,
-              candidates: data.usage?.completion_tokens || 0,
-              total: data.usage?.total_tokens || 0,
-            },
-            keyUsed: `${cfg.name || 'Custom'}:${cfg.apiKey.slice(0, 6)}...`,
-          };
+  if (fallbackConfig.customConfig?.baseUrl && fallbackConfig.customConfig?.apiKey) {
+    const hasLegacy = allServers.some(
+      (s) => s.baseUrl === fallbackConfig.customConfig?.baseUrl && s.apiKey === fallbackConfig.customConfig?.apiKey
+    );
+    if (!hasLegacy) {
+      allServers.push({
+        id: 'legacy_cfg',
+        name: fallbackConfig.customConfig.name || 'سرویس سفارشی',
+        baseUrl: fallbackConfig.customConfig.baseUrl,
+        apiKey: fallbackConfig.customConfig.apiKey,
+        apiKeys: [fallbackConfig.customConfig.apiKey],
+        model: fallbackConfig.customConfig.model || 'deepseek-chat',
+        isEnabled: true,
+      });
+    }
+  }
+
+  for (const srv of allServers) {
+    if (!srv.baseUrl) continue;
+    const keys = Array.isArray(srv.apiKeys) && srv.apiKeys.length > 0
+      ? srv.apiKeys
+      : (srv.apiKey ? [srv.apiKey] : []);
+
+    for (const key of keys) {
+      if (!key || !key.trim()) continue;
+      try {
+        const baseUrl = srv.baseUrl.replace(/\/+$/, '');
+        const url = baseUrl.endsWith('/chat/completions') ? baseUrl : `${baseUrl}/chat/completions`;
+        const controller = new AbortController();
+        // Generous 90s timeout for intermediate broker proxies with high queuing latency
+        const timeoutId = setTimeout(() => controller.abort(), 90000);
+
+        console.log(`[CustomAI] Dispatching batch (${items.length} cues) to ${srv.name} (${srv.model}) via proxy... waiting for response.`);
+        const res = await fetch(url, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${key.trim()}`,
+          },
+          body: JSON.stringify({
+            model: srv.model || 'deepseek-chat',
+            messages: [
+              { role: 'system', content: systemInstruction },
+              { role: 'user', content: userContent },
+            ],
+            temperature: 0.3,
+          }),
+          signal: controller.signal,
+        });
+        clearTimeout(timeoutId);
+
+        if (res.ok) {
+          const data = await res.json();
+          const content = data.choices?.[0]?.message?.content || '';
+          const parsed = parseTranslationsJson(content, items, targetLanguage);
+          if (parsed.length > 0) {
+            console.log(`[CustomAI] Successfully received & verified translation from ${srv.name} (${srv.model})`);
+            const promptTok = data.usage?.prompt_tokens || 0;
+            const compTok = data.usage?.completion_tokens || 0;
+            const totalTok = data.usage?.total_tokens || (promptTok + compTok);
+
+            srv.requestsCount = (srv.requestsCount || 0) + 1;
+            srv.tokensCount = (srv.tokensCount || 0) + totalTok;
+
+            return {
+              translations: parsed,
+              tokens: {
+                prompt: promptTok,
+                candidates: compTok,
+                total: totalTok,
+              },
+              keyUsed: `${srv.name}:${key.slice(0, 6)}...`,
+            };
+          } else {
+            console.warn(`[CustomAI] Response from ${srv.name} did not contain valid translation JSON.`);
+          }
+        } else {
+          const errBody = await res.text().catch(() => '');
+          console.warn(`[CustomAI] ${srv.name} HTTP ${res.status}: ${errBody.slice(0, 120)}`);
         }
+      } catch (err: any) {
+        console.warn(`[CustomAI] ${srv.name} error: ${err?.message || err}`);
       }
-    } catch (err: any) {
-      console.warn(`[FallbackAI] Custom Provider error: ${err?.message || err}`);
     }
   }
 
@@ -1207,8 +1257,10 @@ async function processProjectChunkBatch(
         cueRetryCountMap.delete(cueKey);
       } else {
         const soundFix = autoTranslateSoundEffect(cue.originalText);
-        liveItem.translatedText = soundFix || resolveStubbornEnglishCue(cue.originalText, '') || cue.originalText;
-        cueRetryCountMap.delete(cueKey);
+        if (soundFix) {
+          liveItem.translatedText = soundFix;
+          cueRetryCountMap.delete(cueKey);
+        }
       }
     }
 
@@ -1268,12 +1320,14 @@ async function processProjectChunkBatch(
       const cueKey = `${project.id}_${cue.id}`;
       const retries = (cueRetryCountMap.get(cueKey) || 0) + 1;
       cueRetryCountMap.set(cueKey, retries);
-      if (retries >= 2) {
+      if (retries >= 8) {
         const liveItem = project.items.find((i) => i.id === cue.id);
         if (liveItem && (!liveItem.translatedText || !liveItem.translatedText.trim())) {
           const soundFix = autoTranslateSoundEffect(cue.originalText);
-          liveItem.translatedText = soundFix || resolveStubbornEnglishCue(cue.originalText, '') || cue.originalText.trim();
-          console.warn(`[BackgroundWorker] Auto-rescued stubborn cue #${cue.id} in ${project.name}: "${liveItem.translatedText}"`);
+          if (soundFix) {
+            liveItem.translatedText = soundFix;
+            console.warn(`[BackgroundWorker] Auto-resolved sound cue #${cue.id} in ${project.name}: "${liveItem.translatedText}"`);
+          }
         }
         cueRetryCountMap.delete(cueKey);
       }
@@ -1373,16 +1427,16 @@ async function processTick(): Promise<void> {
 
     const now = Date.now();
 
-    // Deadlock Watchdog: force-clear any cue or key that has been locked in flight for > 25 seconds
+    // Deadlock Watchdog: force-clear any cue or key that has been locked in flight for > 120 seconds (supports intermediate broker proxy latencies)
     for (const [key, ts] of inFlightCueTimestamps.entries()) {
-      if (now - ts > 25_000) {
+      if (now - ts > 120_000) {
         console.warn(`[BackgroundWorker] Watchdog: Auto-cleared stale in-flight cue lock: ${key}`);
         inFlightCueKeys.delete(key);
         inFlightCueTimestamps.delete(key);
       }
     }
     for (const [key, ts] of busyKeyTimestamps.entries()) {
-      if (now - ts > 25_000) {
+      if (now - ts > 120_000) {
         console.warn(`[BackgroundWorker] Watchdog: Auto-cleared stale busy key lock: ${key.slice(0, 6)}...`);
         busyKeys.delete(key);
         busyKeyTimestamps.delete(key);
@@ -1775,6 +1829,34 @@ export function pauseFolderTranslation(folderId: string): number {
 
   saveDatabaseSync();
   return folderProjects.length;
+}
+
+/**
+ * Restart all projects in a folder completely from scratch:
+ * 1. Resets all translated cues to '' (0% progress)
+ * 2. Clears in-flight cues and active working sets for these projects
+ * 3. Sets status = 'queued', isPriority = true
+ * 4. Clears previous errors
+ * 5. Wakes up the worker immediately
+ */
+export function restartFolderFromScratch(folderId: string): { count: number; folderName: string } {
+  const result = resetFolderTranslationFromScratch(folderId);
+
+  // Clear active locks and in-flight tracking for projects in this folder
+  for (const pid of result.projectIds) {
+    activeProjectWorkingSet.delete(pid);
+    for (const cueKey of Array.from(inFlightCueKeys)) {
+      if (cueKey.startsWith(`${pid}_`)) {
+        inFlightCueKeys.delete(cueKey);
+        inFlightCueTimestamps.delete(cueKey);
+      }
+    }
+  }
+
+  resetWorkerExhaustionBackoff();
+  lastWorkerStatusMessage = `پوشه «${result.folderName}» با موفقیت ریست شد و ترجمه تمام ${result.count} فایل از ابتدا (۰٪) آغاز گردید.`;
+  console.log(`[BackgroundWorker] Folder ${folderId} (${result.folderName}) restarted from scratch: ${result.count} projects.`);
+  return { count: result.count, folderName: result.folderName };
 }
 
 /**

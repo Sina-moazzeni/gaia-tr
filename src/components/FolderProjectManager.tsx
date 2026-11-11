@@ -233,6 +233,11 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
   const [keysDetails, setKeysDetails] = useState<KeyDetailItem[]>([]);
   const [editingKeyIndex, setEditingKeyIndex] = useState<number | null>(null);
   const [editingKeyVal, setEditingKeyVal] = useState('');
+  const [selectedKeyIndices, setSelectedKeyIndices] = useState<number[]>([]);
+  const [batchKeyModel, setBatchKeyModel] = useState<string>('gemini-3.1-flash-lite');
+  const [customKeyModelInput, setCustomKeyModelInput] = useState<string>('');
+  const [isBatchDeletingKeys, setIsBatchDeletingKeys] = useState(false);
+  const [isChangingPoolModel, setIsChangingPoolModel] = useState(false);
 
   // Server & Network Configuration Modal
   const [isServerConfigOpen, setIsServerConfigOpen] = useState(false);
@@ -274,6 +279,20 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
   const [isSavingFallback, setIsSavingFallback] = useState(false);
   const [fallbackTestResult, setFallbackTestResult] = useState<any>(null);
   const [isTestingFallback, setIsTestingFallback] = useState(false);
+
+  // Multiple Custom Servers & DeepSeek Brokers State
+  const [customServersList, setCustomServersList] = useState<any[]>([]);
+  const [customKeysList, setCustomKeysList] = useState<any[]>([]);
+  const [keyPoolFilter, setKeyPoolFilter] = useState<'all' | 'gemini' | 'custom'>('all');
+  
+  // New Custom Server form state
+  const [isAddingNewServer, setIsAddingNewServer] = useState(false);
+  const [newServerName, setNewServerName] = useState('DeepSeek واسط شماره ۱');
+  const [newServerBaseUrl, setNewServerBaseUrl] = useState('https://api.deepseek.com/v1');
+  const [newServerModel, setNewServerModel] = useState('deepseek-chat');
+  const [newServerKeysText, setNewServerKeysText] = useState('');
+  const [isSavingCustomServer, setIsSavingCustomServer] = useState(false);
+  const [testingCustomServerId, setTestingCustomServerId] = useState<string | null>(null);
 
   // Server Info & Storage Location State
   const [serverInfo, setServerInfo] = useState<{
@@ -451,6 +470,42 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
     }
   };
 
+  const [isRestartingFolder, setIsRestartingFolder] = useState(false);
+
+  const handleRestartFolderFromScratch = async (folderIdTarget?: string, folderNameTarget?: string) => {
+    const targetId = folderIdTarget || selectedFolderId;
+    if (!targetId) return;
+    const fObj = folders.find((f) => f.id === targetId);
+    const folderName = folderNameTarget || fObj?.name || 'پوشه انتخابی';
+
+    const confirmMsg = `⚠️ هشدار ترجمه مجدد از صفر:\n\nآیا مطمئن هستید که می‌خواهید تمام فایل‌های پوشه «${folderName}» از ابتدا ترجمه شوند؟\n\n- تمامی ترجمه‌های قبلی تمام فایل‌های این پوشه پاک خواهند شد و پیشرفت به ۰٪ برمی‌گردد.\n- متن انگلیسی اصلی و زمان‌بندی دقیق زیرنویس‌ها کاملاً حفظ می‌شود (هیچ نیازی به آپلود مجدد فایل‌ها نیست).\n- موتور ترجمه هوشمند تمیز بلافاصله از سطر اول شروع به ترجمه دقیق خواهد کرد.\n\nادامه می‌دهید؟`;
+
+    if (!window.confirm(confirmMsg)) return;
+
+    setIsRestartingFolder(true);
+    onShowToast(`در حال پاکسازی ترجمه‌ها و آماده‌سازی پوشه «${folderName}» برای ترجمه مجدد از ابتدا...`, 'info');
+
+    try {
+      const res = await fetch(`/api/folders/${targetId}/restart-from-scratch`, {
+        method: 'POST',
+      });
+      const data = await res.json();
+      if (data.success) {
+        onShowToast(data.message || `تمامی فایل‌های پوشه «${folderName}» پاکسازی و ترجمه مجدد از ابتدا آغاز گردید.`, 'success');
+        if (selectedFolderId) await fetchProjects(selectedFolderId);
+        await fetchFolders();
+        if (activeView === 'all_files') await fetchAllProjects();
+        await fetchWorkerStatus();
+      } else {
+        onShowToast(data.error || 'خطا در ریست کردن پوشه', 'error');
+      }
+    } catch {
+      onShowToast('خطا در برقراری ارتباط با سرور برای ترجمه مجدد پوشه', 'error');
+    } finally {
+      setIsRestartingFolder(false);
+    }
+  };
+
   const handleSetDualConcurrency = async (files?: number, _keysPerProject?: number) => {
     try {
       const targetFiles = files || serverConfig.maxConcurrentProjects || 4;
@@ -540,8 +595,120 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
         if (Array.isArray(data.details)) {
           setKeysDetails(data.details);
         }
+        if (Array.isArray(data.customServers)) {
+          setCustomServersList(data.customServers);
+        }
+        if (Array.isArray(data.customKeys)) {
+          setCustomKeysList(data.customKeys);
+        }
       }
     } catch {}
+  };
+
+  const handleAddCustomServer = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const lines = newServerKeysText
+      .split('\n')
+      .map((k) => k.trim())
+      .filter((k) => k.length > 5);
+
+    if (!newServerBaseUrl.trim()) {
+      onShowToast('آدرس سرور (Base URL) الزامی است.', 'error');
+      return;
+    }
+    if (lines.length === 0) {
+      onShowToast('حداقل یک کلید API معتبر وارد نمایید.', 'error');
+      return;
+    }
+
+    setIsSavingCustomServer(true);
+    try {
+      const res = await fetch('/api/server/custom-servers', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: newServerName.trim() || 'سرور سفارشی DeepSeek',
+          baseUrl: newServerBaseUrl.trim(),
+          model: newServerModel.trim() || 'deepseek-chat',
+          apiKeys: lines,
+          isEnabled: true,
+        }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        onShowToast(data.message || `سرور با ${lines.length} کلید با موفقیت اضافه شد.`, 'success');
+        setCustomServersList(data.servers || []);
+        setCustomKeysList(data.customKeys || []);
+        setNewServerKeysText('');
+        setIsAddingNewServer(false);
+        await fetchServerKeys();
+      } else {
+        onShowToast(data.error || 'خطا در ثبت سرور سفارشی', 'error');
+      }
+    } catch {
+      onShowToast('خطا در ارتباط با سرور', 'error');
+    } finally {
+      setIsSavingCustomServer(false);
+    }
+  };
+
+  const handleDeleteCustomServer = async (id: string, name: string) => {
+    if (!window.confirm(`آیا از حذف سرور سفارشی «${name}» مطمئن هستید؟`)) return;
+    try {
+      const res = await fetch(`/api/server/custom-servers/${id}`, { method: 'DELETE' });
+      const data = await res.json();
+      if (data.success) {
+        onShowToast(data.message || 'سرور با موفقیت حذف شد.', 'info');
+        setCustomServersList(data.servers || []);
+        setCustomKeysList(data.customKeys || []);
+        await fetchServerKeys();
+      }
+    } catch {
+      onShowToast('خطا در حذف سرور', 'error');
+    }
+  };
+
+  const handleToggleCustomServer = async (id: string) => {
+    try {
+      const res = await fetch(`/api/server/custom-servers/${id}/toggle`, { method: 'POST' });
+      const data = await res.json();
+      if (data.success) {
+        setCustomServersList(data.servers || []);
+        setCustomKeysList(data.customKeys || []);
+        await fetchServerKeys();
+      }
+    } catch {}
+  };
+
+  const handleTestCustomServer = async (srv: any, singleKey?: string) => {
+    const keyToTest = singleKey || srv.apiKey || (srv.apiKeys && srv.apiKeys[0]);
+    if (!keyToTest) {
+      onShowToast('کلیدی برای تست یافت نشد.', 'error');
+      return;
+    }
+    setTestingCustomServerId(srv.id || singleKey);
+    try {
+      const res = await fetch('/api/server/fallback-providers/test', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          provider: 'custom',
+          key: keyToTest,
+          baseUrl: srv.baseUrl,
+          model: srv.model,
+        }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        onShowToast(`✓ تست موفق سرور «${srv.name || srv.model}»: زمان تاخیر ${data.latencyMs} میلی‌ثانیه`, 'success');
+      } else {
+        onShowToast(`خطا در تست: ${data.message || data.error || 'عدم پاسخگویی سرور'}`, 'error');
+      }
+    } catch {
+      onShowToast('خطای شبکه در تست سرور سفارشی', 'error');
+    } finally {
+      setTestingCustomServerId(null);
+    }
   };
 
   // Fetch folders list
@@ -1390,20 +1557,86 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
       return;
     }
 
+    const modelToSet = batchKeyModel === 'custom' ? customKeyModelInput.trim() : batchKeyModel;
+
     try {
       const res = await fetch('/api/server/keys', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ keys: lines, mode: keySaveMode }),
+        body: JSON.stringify({ keys: lines, mode: keySaveMode, model: modelToSet }),
       });
       const data = await res.json();
       if (data.success) {
         onShowToast(data.message || 'کلیدها با موفقیت در سرور ثبت شدند.', 'success');
         setServerKeysText('');
         fetchServerKeys();
+        fetchWorkerStatus();
       }
     } catch {
       onShowToast('خطا در ذخیره کلیدهای سرور', 'error');
+    }
+  };
+
+  // Batch delete selected server keys or delete all
+  const handleBatchDeleteKeys = async (deleteAll = false) => {
+    if (!deleteAll && selectedKeyIndices.length === 0) {
+      onShowToast('لطفاً حداقل یک کلید را برای حذف انتخاب کنید.', 'error');
+      return;
+    }
+    const confirmMsg = deleteAll
+      ? 'آیا مطمئن هستید که می‌خواهید تمام کلیدهای استخر سرور را حذف کنید؟'
+      : `آیا از حذف ${selectedKeyIndices.length} کلید انتخاب‌شده مطمئن هستید؟`;
+    if (!window.confirm(confirmMsg)) return;
+
+    setIsBatchDeletingKeys(true);
+    try {
+      const res = await fetch('/api/server/keys/batch-delete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ indices: selectedKeyIndices, deleteAll }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        onShowToast(data.message || 'حذف کلیدها با موفقیت انجام شد.', 'info');
+        setSelectedKeyIndices([]);
+        await fetchServerKeys();
+        await fetchWorkerStatus();
+      } else {
+        onShowToast(data.error || 'خطا در حذف کلیدها', 'error');
+      }
+    } catch {
+      onShowToast('خطا در ارتباط با سرور برای حذف کلیدها', 'error');
+    } finally {
+      setIsBatchDeletingKeys(false);
+    }
+  };
+
+  // Batch change active model for server keys
+  const handleChangePoolModel = async (modelToApply: string) => {
+    const targetModel = modelToApply === 'custom' ? customKeyModelInput.trim() : modelToApply;
+    if (!targetModel) {
+      onShowToast('لطفاً نام مدل را وارد کنید.', 'error');
+      return;
+    }
+    setIsChangingPoolModel(true);
+    try {
+      const res = await fetch('/api/server/keys/change-model', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model: targetModel }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        onShowToast(data.message || `مدل استخر با موفقیت به «${targetModel}» تغییر یافت.`, 'success');
+        setBatchKeyModel(targetModel);
+        await fetchWorkerStatus();
+      } else {
+        onShowToast(data.error || 'خطا در تغییر مدل استخر', 'error');
+      }
+    } catch {
+      onShowToast('خطا در ارتباط با سرور برای تغییر مدل استخر', 'error');
+    } finally {
+      setIsChangingPoolModel(false);
     }
   };
 
@@ -1955,6 +2188,21 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
                       {folderIncompleteOrUntranslated.length} فایل
                     </span>
                   )}
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => handleRestartFolderFromScratch(currentFolder?.id, currentFolder?.name)}
+                  disabled={isRestartingFolder}
+                  className="flex items-center gap-2 px-4 py-2.5 rounded-xl font-bold text-xs bg-amber-500/15 hover:bg-amber-500/25 text-amber-300 border border-amber-500/40 hover:border-amber-400 cursor-pointer transition-all shadow-lg shadow-amber-500/10"
+                  title="پاکسازی تمام ترجمه‌های قبلی این پوشه و شروع ترجمه مجدد از ابتدا (۰٪) با موتور تمیز - بدون نیاز به آپلود مجدد فایل‌ها"
+                >
+                  {isRestartingFolder ? (
+                    <Loader2 className="w-4 h-4 animate-spin text-amber-400" />
+                  ) : (
+                    <RotateCcw className="w-4 h-4 text-amber-400" />
+                  )}
+                  <span>🔄 ترجمه مجدد پوشه از صفر</span>
                 </button>
 
                 <button
@@ -2554,6 +2802,15 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
                             className="flex items-center gap-1 shrink-0"
                             onClick={(e) => e.stopPropagation()}
                           >
+                            <button
+                              type="button"
+                              onClick={() => handleRestartFolderFromScratch(folder.id, folder.name)}
+                              disabled={isRestartingFolder}
+                              className="p-1.5 text-slate-400 hover:text-amber-400 hover:bg-amber-500/10 rounded-lg transition-colors cursor-pointer"
+                              title="ترجمه مجدد کل این پوشه از صفر (پاکسازی ترجمه‌ها و شروع مجدد از ۰٪)"
+                            >
+                              <RotateCcw className="w-3.5 h-3.5" />
+                            </button>
                             <button
                               type="button"
                               onClick={() => {
@@ -3782,14 +4039,19 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
 
             <form onSubmit={handleExecuteFolderBatchReplace} className="flex flex-col gap-4">
               <div>
-                <label className="text-xs text-slate-300 font-semibold block mb-1">
-                  کلمه یا عبارت جستجو:
-                </label>
+                <div className="flex items-center justify-between mb-1">
+                  <label className="text-xs text-slate-300 font-semibold block">
+                    کلمه یا عبارت دقیق برای جستجو:
+                  </label>
+                  <span className="text-[10px] text-emerald-400 font-mono">
+                    ✓ تطابق دقیق عبارت (Exact Phrase)
+                  </span>
+                </div>
                 <input
                   type="text"
                   value={batchFindText}
                   onChange={(e) => setBatchFindText(e.target.value)}
-                  placeholder="مثال: موجودات فضایی"
+                  placeholder="مثال: سلام دنیا (عیناً این دو کلمه کنار هم جایگزین می‌شوند)"
                   required
                   className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-none focus:border-indigo-500"
                   autoFocus
@@ -4236,12 +4498,64 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
             {/* Registered Keys List with Token Usage Table */}
             <div className="flex flex-col gap-3">
               <div className="flex items-center justify-between flex-wrap gap-2">
-                <span className="text-xs font-bold text-slate-200 flex items-center gap-2">
-                  <Activity className="w-4 h-4 text-indigo-400" />
-                  <span>فهرست کامل کلیدها و گزارش تفکیکی توکن ({keysDetails.length} کلید)</span>
-                </span>
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className="text-xs font-bold text-slate-200 flex items-center gap-2">
+                    <Activity className="w-4 h-4 text-indigo-400" />
+                    <span>فهرست کلیدهای API سرور ({keysDetails.length + customKeysList.length} کلید)</span>
+                  </span>
+
+                  {/* Filter Pills */}
+                  <div className="flex items-center gap-1 bg-slate-950 p-1 rounded-xl border border-slate-800 text-xs">
+                    <button
+                      type="button"
+                      onClick={() => setKeyPoolFilter('all')}
+                      className={`px-2.5 py-1 rounded-lg font-bold transition-all cursor-pointer ${
+                        keyPoolFilter === 'all'
+                          ? 'bg-indigo-600 text-white shadow-sm'
+                          : 'text-slate-400 hover:text-white'
+                      }`}
+                    >
+                      همه ({keysDetails.length + customKeysList.length})
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setKeyPoolFilter('gemini')}
+                      className={`px-2.5 py-1 rounded-lg font-bold transition-all cursor-pointer ${
+                        keyPoolFilter === 'gemini'
+                          ? 'bg-indigo-600 text-white shadow-sm'
+                          : 'text-slate-400 hover:text-white'
+                      }`}
+                    >
+                      Gemini ({keysDetails.length})
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setKeyPoolFilter('custom')}
+                      className={`px-2.5 py-1 rounded-lg font-bold transition-all cursor-pointer ${
+                        keyPoolFilter === 'custom'
+                          ? 'bg-cyan-600 text-white shadow-sm'
+                          : 'text-slate-400 hover:text-white'
+                      }`}
+                    >
+                      واسط‌های DeepSeek ({customKeysList.length})
+                    </button>
+                  </div>
+                </div>
 
                 <div className="flex items-center gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setKeysModalTab('fallback');
+                      setIsAddingNewServer(true);
+                    }}
+                    className="text-[11px] text-cyan-300 hover:text-cyan-200 flex items-center gap-1 bg-cyan-500/10 hover:bg-cyan-500/20 px-2.5 py-1 rounded-lg border border-cyan-500/30 font-bold cursor-pointer transition-colors"
+                    title="افزودن سرور کاستوم یا کلیدهای واسط DeepSeek"
+                  >
+                    <Plus className="w-3.5 h-3.5" />
+                    <span>+ افزودن سرور DeepSeek</span>
+                  </button>
+
                   <button
                     type="button"
                     onClick={handleResetKeyStats}
@@ -4263,13 +4577,90 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
                 </div>
               </div>
 
-              {keysDetails.length === 0 ? (
+              {/* Batch Controls Toolbar: Select All, Batch Delete, Batch Model Change */}
+              <div className="bg-slate-950/80 border border-slate-800 rounded-xl p-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs">
+                <div className="flex items-center gap-3 flex-wrap">
+                  <label className="flex items-center gap-1.5 cursor-pointer font-bold text-slate-300">
+                    <input
+                      type="checkbox"
+                      checked={keysDetails.length > 0 && selectedKeyIndices.length === keysDetails.length}
+                      onChange={(e) => {
+                        if (e.target.checked) setSelectedKeyIndices(keysDetails.map((k) => k.index));
+                        else setSelectedKeyIndices([]);
+                      }}
+                      className="accent-indigo-500 w-4 h-4 rounded cursor-pointer"
+                    />
+                    <span>انتخاب همه ({selectedKeyIndices.length} از {keysDetails.length})</span>
+                  </label>
+
+                  {selectedKeyIndices.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => handleBatchDeleteKeys(false)}
+                      disabled={isBatchDeletingKeys}
+                      className="flex items-center gap-1.5 px-3 py-1 rounded-lg text-xs font-bold bg-rose-600/30 text-rose-300 hover:bg-rose-600/50 border border-rose-500/40 cursor-pointer transition-colors"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                      <span>حذف انتخاب‌شده‌ها ({selectedKeyIndices.length})</span>
+                    </button>
+                  )}
+
+                  {keysDetails.length > 0 && (
+                    <button
+                      type="button"
+                      onClick={() => handleBatchDeleteKeys(true)}
+                      disabled={isBatchDeletingKeys}
+                      className="flex items-center gap-1 px-2.5 py-1 rounded-lg text-[11px] text-slate-400 hover:text-rose-300 bg-slate-900 border border-slate-800 hover:border-rose-500/30 cursor-pointer transition-colors"
+                      title="پاکسازی کامل استخر و حذف تمام کلیدها"
+                    >
+                      <span>پاکسازی کل استخر</span>
+                    </button>
+                  )}
+                </div>
+
+                {/* Batch Model Changer */}
+                <div className="flex items-center gap-2 flex-wrap">
+                  <span className="text-slate-400 font-semibold shrink-0">مدل استخر:</span>
+                  <select
+                    value={batchKeyModel}
+                    onChange={(e) => setBatchKeyModel(e.target.value)}
+                    className="bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1 text-xs text-amber-300 font-mono focus:outline-none focus:border-indigo-500"
+                  >
+                    <option value="gemini-3.1-flash-lite">Gemini 3.1 Flash Lite (فوق‌سریع - پیش‌فرض)</option>
+                    <option value="gemini-flash-latest">Gemini Flash Latest (نسخه پایدار)</option>
+                    <option value="gemini-3.8-flash">Gemini 3.8 Flash (دقت بالا)</option>
+                    <option value="gemini-2.5-flash">Gemini 2.5 Flash</option>
+                    <option value="custom">مدل سفارشی...</option>
+                  </select>
+                  {batchKeyModel === 'custom' && (
+                    <input
+                      type="text"
+                      placeholder="مثال: gemini-..."
+                      value={customKeyModelInput}
+                      onChange={(e) => setCustomKeyModelInput(e.target.value)}
+                      className="bg-slate-900 border border-slate-700 rounded-lg px-2 py-1 text-xs text-white w-32 font-mono"
+                    />
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => handleChangePoolModel(batchKeyModel)}
+                    disabled={isChangingPoolModel}
+                    className="px-3 py-1 rounded-lg text-xs font-bold bg-indigo-600 hover:bg-indigo-500 text-white transition-colors cursor-pointer disabled:opacity-50"
+                    title="تغییر دسته جمعی مدل فعال برای تمام کلیدهای استخر"
+                  >
+                    {isChangingPoolModel ? 'در حال اعمال...' : 'اعمال مدل'}
+                  </button>
+                </div>
+              </div>
+
+              {keysDetails.length === 0 && customKeysList.length === 0 ? (
                 <div className="text-xs text-amber-300/90 bg-amber-500/10 border border-amber-500/20 rounded-2xl p-4 text-center">
-                  هنوز هیچ کلیدی در سرور ذخیره نشده است. با استفاده از کادر زیر کلیدهای Gemini خود را وارد کنید.
+                  هنوز هیچ کلیدی (Gemini یا سرور واسط DeepSeek) در سرور ذخیره نشده است. با استفاده از کادر زیر یا زبانه «سرورهای واسط DeepSeek / کاستوم» کلیدهای خود را اضافه کنید.
                 </div>
               ) : (
-                <div className="max-h-72 overflow-y-auto space-y-2.5 pr-1 border border-slate-800/80 rounded-2xl p-2 bg-slate-950/50">
-                  {keysDetails.map((k) => (
+                <div className="max-h-96 overflow-y-auto space-y-2.5 pr-1 border border-slate-800/80 rounded-2xl p-2 bg-slate-950/50">
+                  {/* Gemini Keys */}
+                  {(keyPoolFilter === 'all' || keyPoolFilter === 'gemini') && keysDetails.map((k) => (
                     <div
                       key={k.index}
                       className={`flex flex-col p-3 rounded-xl border text-xs transition-all ${
@@ -4310,7 +4701,16 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
                         <div className="flex flex-col md:flex-row md:items-center justify-between gap-3">
                           {/* Key Identity & Status */}
                           <div className="flex items-center gap-2.5 min-w-0">
-                            <span className="w-6 h-6 rounded-lg bg-slate-800 border border-slate-700 flex items-center justify-center text-[11px] font-mono text-slate-300 font-bold shrink-0">
+                            <input
+                              type="checkbox"
+                              checked={selectedKeyIndices.includes(k.index)}
+                              onChange={(e) => {
+                                if (e.target.checked) setSelectedKeyIndices((prev) => [...prev, k.index]);
+                                else setSelectedKeyIndices((prev) => prev.filter((i) => i !== k.index));
+                              }}
+                              className="accent-indigo-500 w-4 h-4 rounded cursor-pointer shrink-0"
+                            />
+                            <span className="w-6 h-6 rounded-lg bg-indigo-950/70 border border-indigo-500/40 flex items-center justify-center text-[10px] font-mono text-indigo-300 font-bold shrink-0">
                               #{k.index + 1}
                             </span>
                             <div className="flex flex-col min-w-0">
@@ -4329,6 +4729,9 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
                                 >
                                   <Copy className="w-3 h-3" />
                                 </button>
+                                <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-indigo-500/20 text-indigo-300 border border-indigo-500/30">
+                                  Gemini
+                                </span>
                               </div>
 
                               <div className="flex items-center gap-3 text-[10px] text-slate-400 mt-0.5">
@@ -4433,6 +4836,99 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
                       )}
                     </div>
                   ))}
+
+                  {/* DeepSeek & Custom Proxy Keys */}
+                  {(keyPoolFilter === 'all' || keyPoolFilter === 'custom') && customKeysList.map((ck, idx) => (
+                    <div
+                      key={`custom-key-${ck.serverId}-${idx}`}
+                      className={`flex flex-col p-3 rounded-xl border text-xs transition-all ${
+                        !ck.isEnabled
+                          ? 'bg-slate-950/40 border-slate-800/50 opacity-60'
+                          : 'bg-emerald-950/15 border-emerald-500/20 hover:border-emerald-500/40'
+                      }`}
+                    >
+                      <div className="flex flex-col md:flex-row md:items-center justify-between gap-3">
+                        {/* Identity & Status */}
+                        <div className="flex items-center gap-2.5 min-w-0">
+                          <span className="w-6 h-6 rounded-lg bg-emerald-950/70 border border-emerald-500/40 flex items-center justify-center text-[10px] font-mono text-emerald-300 font-bold shrink-0">
+                            DS
+                          </span>
+                          <div className="flex flex-col min-w-0">
+                            <div className="flex items-center gap-2">
+                              <span className="font-mono text-white tracking-wider truncate font-semibold">
+                                {ck.maskedKey}
+                              </span>
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  navigator.clipboard.writeText(ck.rawKey);
+                                  onShowToast('کلید واسط در کلیپ‌بورد کپی شد.', 'info');
+                                }}
+                                className="text-slate-500 hover:text-slate-300 p-0.5"
+                                title="کپی کلید کامل واسط"
+                              >
+                                <Copy className="w-3 h-3" />
+                              </button>
+                              <span className="text-[10px] font-bold px-2 py-0.5 rounded-md bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
+                                {ck.serverName}
+                              </span>
+                            </div>
+
+                            <div className="flex items-center gap-3 text-[10px] text-slate-400 mt-0.5">
+                              {ck.isEnabled ? (
+                                <span className="flex items-center gap-1 text-emerald-400 font-semibold">
+                                  <CheckCircle2 className="w-3 h-3" />
+                                  <span>🟢 فعال در استخر واسط‌ها (مدل: {ck.model})</span>
+                                </span>
+                              ) : (
+                                <span className="flex items-center gap-1 text-slate-500">
+                                  <AlertCircle className="w-3 h-3" />
+                                  <span>غیرفعال (خاموش در تنظیمات سرورها)</span>
+                                </span>
+                              )}
+                              <span className="text-slate-500 font-mono text-[9px] truncate max-w-[200px]" dir="ltr">
+                                {ck.baseUrl}
+                              </span>
+                            </div>
+                          </div>
+                        </div>
+
+                        {/* Token Consumption Stats Badges */}
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <div className="flex items-center gap-1.5 bg-slate-950 px-2 py-1 rounded-lg border border-slate-800 text-[11px]">
+                            <span className="text-slate-400">درخواست‌ها:</span>
+                            <span className="font-mono text-white font-bold">{ck.requestsCount || 0}</span>
+                          </div>
+                          <div className="flex items-center gap-1.5 bg-emerald-950/40 px-2 py-1 rounded-lg border border-emerald-500/30 text-[11px]">
+                            <span className="text-emerald-300 font-bold">توکن مصرفی:</span>
+                            <span className="font-mono text-emerald-200 font-bold">{(ck.tokensCount || 0).toLocaleString()}</span>
+                          </div>
+                        </div>
+
+                        {/* Action Buttons */}
+                        <div className="flex items-center gap-1.5 shrink-0 self-end md:self-center">
+                          <button
+                            type="button"
+                            onClick={() => handleTestCustomServer(ck.serverId)}
+                            disabled={testingCustomServerId === ck.serverId}
+                            className="px-2.5 py-1 rounded-lg bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300 border border-emerald-500/40 text-[10px] font-bold transition-colors cursor-pointer disabled:opacity-50"
+                            title="تست پینگ و ارتباط واقعی با این سرور واسط"
+                          >
+                            {testingCustomServerId === ck.serverId ? 'در حال تست...' : 'تست زنده واسط'}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setKeysModalTab('fallback')}
+                            className="p-1.5 rounded-lg text-slate-400 hover:text-emerald-300 bg-slate-800 hover:bg-slate-700 transition-colors cursor-pointer text-[10px] flex items-center gap-1"
+                            title="ویرایش یا افزودن کلیدهای این سرور در زبانه واسط‌ها"
+                          >
+                            <Settings className="w-3.5 h-3.5" />
+                            <span>تنظیمات</span>
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  ))}
                 </div>
               )}
             </div>
@@ -4514,6 +5010,33 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
                     />
                     <span>جایگزینی کل استخر کلیدها</span>
                   </label>
+                </div>
+              </div>
+
+              {/* Model selection when adding keys */}
+              <div className="flex items-center justify-between flex-wrap gap-2 bg-slate-950/60 p-2.5 rounded-xl border border-slate-800 text-xs">
+                <span className="text-slate-300 font-medium">مدل ترجمه برای این کلیدها:</span>
+                <div className="flex items-center gap-2">
+                  <select
+                    value={batchKeyModel}
+                    onChange={(e) => setBatchKeyModel(e.target.value)}
+                    className="bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1 text-xs text-amber-300 font-mono focus:outline-none focus:border-indigo-500"
+                  >
+                    <option value="gemini-3.1-flash-lite">Gemini 3.1 Flash Lite (فوق‌سریع - پیش‌فرض)</option>
+                    <option value="gemini-flash-latest">Gemini Flash Latest</option>
+                    <option value="gemini-3.8-flash">Gemini 3.8 Flash</option>
+                    <option value="gemini-2.5-flash">Gemini 2.5 Flash</option>
+                    <option value="custom">مدل سفارشی...</option>
+                  </select>
+                  {batchKeyModel === 'custom' && (
+                    <input
+                      type="text"
+                      placeholder="نام مدل..."
+                      value={customKeyModelInput}
+                      onChange={(e) => setCustomKeyModelInput(e.target.value)}
+                      className="bg-slate-900 border border-slate-700 rounded-lg px-2 py-1 text-xs text-white w-32 font-mono"
+                    />
+                  )}
                 </div>
               </div>
 
@@ -4698,66 +5221,255 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
                   </div>
                 </div>
 
-                {/* Provider 3: Custom Provider (OpenAI Compatible: DeepSeek, OpenRouter, vLLM, etc.) */}
-                <div className="bg-slate-950/70 border border-slate-800 rounded-2xl p-4 flex flex-col gap-3">
-                  <div className="flex items-center justify-between flex-wrap gap-2 pb-2 border-b border-slate-800">
-                    <div className="flex items-center gap-2 font-bold text-slate-100 text-xs">
+                {/* Provider 3: Multiple Custom Servers & DeepSeek Brokers Pool */}
+                <div className="bg-slate-950/70 border border-slate-800 rounded-2xl p-4 flex flex-col gap-4">
+                  <div className="flex items-center justify-between flex-wrap gap-2 pb-3 border-b border-slate-800">
+                    <div className="flex items-center gap-2 font-bold text-slate-100 text-xs sm:text-sm">
                       <span className="w-2.5 h-2.5 rounded-full bg-cyan-400"></span>
-                      <span>سرویس‌دهنده اختصاصی و دستی (سازگار با OpenAI: DeepSeek, OpenRouter, etc.)</span>
+                      <span>استخر سرورهای کاستوم و کلیدهای واسط DeepSeek ({customServersList.length} سرور / {customKeysList.length} کلید)</span>
                     </div>
-                    <button
-                      type="button"
-                      onClick={() => handleTestFallbackKey('custom')}
-                      disabled={isTestingFallback}
-                      className="px-3 py-1 bg-slate-800 hover:bg-slate-700 text-slate-200 text-[11px] font-bold rounded-lg border border-slate-700 flex items-center gap-1 cursor-pointer"
-                    >
-                      {isTestingFallback ? <Loader2 className="w-3 h-3 animate-spin" /> : <Play className="w-3 h-3 text-cyan-400" />}
-                      <span>تست آنلاین سرویس سفارشی</span>
-                    </button>
+
+                    <div className="flex items-center gap-2">
+                      <button
+                        type="button"
+                        onClick={() => setIsAddingNewServer(!isAddingNewServer)}
+                        className="px-3 py-1.5 bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-bold rounded-xl shadow-md shadow-cyan-600/20 flex items-center gap-1.5 cursor-pointer transition-colors"
+                      >
+                        <Plus className="w-3.5 h-3.5" />
+                        <span>{isAddingNewServer ? 'بستن فرم' : '+ افزودن سرور کاستوم جدید'}</span>
+                      </button>
+                    </div>
                   </div>
 
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
-                    <div>
-                      <label className="text-[11px] text-slate-400 block mb-1">نام یا عنوان سرویس:</label>
-                      <input
-                        type="text"
-                        value={customProviderName}
-                        onChange={(e) => setCustomProviderName(e.target.value)}
-                        placeholder="DeepSeek / OpenRouter"
-                        className="w-full bg-slate-900 border border-slate-800 rounded-xl px-3 py-2 text-xs text-white"
-                      />
-                    </div>
-                    <div>
-                      <label className="text-[11px] text-slate-400 block mb-1">نام مدل (Model Name):</label>
-                      <input
-                        type="text"
-                        value={customModel}
-                        onChange={(e) => setCustomModel(e.target.value)}
-                        placeholder="deepseek-chat"
-                        className="w-full bg-slate-900 border border-slate-800 rounded-xl px-3 py-2 text-xs text-cyan-300 font-mono direction-ltr"
-                      />
-                    </div>
-                    <div>
-                      <label className="text-[11px] text-slate-400 block mb-1">آدرس سرور (Base URL):</label>
-                      <input
-                        type="text"
-                        value={customBaseUrl}
-                        onChange={(e) => setCustomBaseUrl(e.target.value)}
-                        placeholder="https://api.deepseek.com/v1"
-                        className="w-full bg-slate-900 border border-slate-800 rounded-xl px-3 py-2 text-xs text-slate-200 font-mono direction-ltr"
-                      />
-                    </div>
-                    <div>
-                      <label className="text-[11px] text-slate-400 block mb-1">کلید API (API Key):</label>
-                      <input
-                        type="password"
-                        value={customApiKey}
-                        onChange={(e) => setCustomApiKey(e.target.value)}
-                        placeholder="sk-..."
-                        className="w-full bg-slate-900 border border-slate-800 rounded-xl px-3 py-2 text-xs text-amber-300 font-mono direction-ltr"
-                      />
+                  {/* Latency & Proxy Broker Notice */}
+                  <div className="bg-cyan-950/40 border border-cyan-500/30 rounded-xl p-3 text-[11px] text-cyan-200 flex items-start gap-2 leading-relaxed">
+                    <Info className="w-4 h-4 text-cyan-400 shrink-0 mt-0.5" />
+                    <div className="flex flex-col gap-0.5">
+                      <span className="font-bold text-cyan-300">رعایت تاخیر سرورهای واسط و ارسال کاملاً ترتیبی:</span>
+                      <span>
+                        سرورهای واسط و بروکرها معمولاً به دلیل صف‌بندی با تاخیر پاسخ می‌دهند. سیستم تاخیر پاسخ سرور واسط را کاملاً رعایت کرده و تا زمان دریافت پاسخ معتبر، هیچ درخواست موازی مخربی ارسال نمی‌کند و پس از تایید موفقیت هر بسته، بسته بعدی فرستاده می‌شود.
+                      </span>
                     </div>
                   </div>
+
+                  {/* Form to Add New Custom Server */}
+                  {(isAddingNewServer || customServersList.length === 0) && (
+                    <form onSubmit={handleAddCustomServer} className="bg-slate-900/90 border border-cyan-500/30 rounded-2xl p-4 flex flex-col gap-3">
+                      <div className="flex items-center justify-between pb-2 border-b border-slate-800">
+                        <span className="text-xs font-bold text-cyan-300 flex items-center gap-1.5">
+                          <Plus className="w-3.5 h-3.5" />
+                          <span>مشخصات سرور سفارشی جدید (DeepSeek / OneAPI / OpenRouter)</span>
+                        </span>
+                        {customServersList.length > 0 && (
+                          <button
+                            type="button"
+                            onClick={() => setIsAddingNewServer(false)}
+                            className="text-slate-400 hover:text-white text-xs"
+                          >
+                            ✕
+                          </button>
+                        )}
+                      </div>
+
+                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
+                        <div>
+                          <label className="text-[11px] text-slate-300 block mb-1 font-semibold">عنوان یا برچسب سرور:</label>
+                          <input
+                            type="text"
+                            value={newServerName}
+                            onChange={(e) => setNewServerName(e.target.value)}
+                            placeholder="مثال: DeepSeek واسط ۱"
+                            className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white"
+                          />
+                        </div>
+
+                        <div>
+                          <label className="text-[11px] text-slate-300 block mb-1 font-semibold">آدرس سرور (Base URL):</label>
+                          <input
+                            type="text"
+                            value={newServerBaseUrl}
+                            onChange={(e) => setNewServerBaseUrl(e.target.value)}
+                            placeholder="https://api.deepseek.com/v1"
+                            className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs text-cyan-300 font-mono direction-ltr"
+                          />
+                        </div>
+
+                        <div>
+                          <label className="text-[11px] text-slate-300 block mb-1 font-semibold">نام مدل (Model):</label>
+                          <input
+                            type="text"
+                            value={newServerModel}
+                            onChange={(e) => setNewServerModel(e.target.value)}
+                            placeholder="deepseek-chat"
+                            className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs text-amber-300 font-mono direction-ltr"
+                          />
+                        </div>
+                      </div>
+
+                      {/* Quick Presets for Base URL */}
+                      <div className="flex items-center gap-2 flex-wrap text-[11px] text-slate-400 pt-1">
+                        <span className="text-slate-400">تنظیم سریع آدرس:</span>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setNewServerBaseUrl('https://api.deepseek.com/v1');
+                            setNewServerModel('deepseek-chat');
+                          }}
+                          className="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-cyan-300 font-mono cursor-pointer transition-colors"
+                        >
+                          DeepSeek مستقیم
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setNewServerBaseUrl('https://openrouter.ai/api/v1');
+                            setNewServerModel('deepseek/deepseek-chat');
+                          }}
+                          className="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-indigo-300 font-mono cursor-pointer transition-colors"
+                        >
+                          OpenRouter
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setNewServerBaseUrl('https://api.oneapi.net/v1');
+                            setNewServerModel('deepseek-chat');
+                          }}
+                          className="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-amber-300 font-mono cursor-pointer transition-colors"
+                        >
+                          OneAPI / واسط
+                        </button>
+                      </div>
+
+                      {/* Multiple API Keys Input Textarea */}
+                      <div className="flex flex-col gap-1 mt-1">
+                        <label className="text-[11px] text-slate-300 font-semibold flex items-center justify-between">
+                          <span>کلیدهای API برای این سرور (هر کلید در یک سطر — می‌توانید ده‌ها کلید وارد نمایید):</span>
+                          <span className="text-[10px] text-slate-400">یکجا اضافه و به لیست API های سرور افزوده می‌شوند</span>
+                        </label>
+                        <textarea
+                          rows={3}
+                          value={newServerKeysText}
+                          onChange={(e) => setNewServerKeysText(e.target.value)}
+                          placeholder={"sk-...\nsk-...\nsk-..."}
+                          className="w-full bg-slate-950 border border-slate-700 rounded-xl p-3 text-xs text-amber-300 font-mono focus:outline-none focus:border-cyan-500 direction-ltr placeholder-slate-600"
+                        />
+                      </div>
+
+                      <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-800">
+                        {customServersList.length > 0 && (
+                          <button
+                            type="button"
+                            onClick={() => setIsAddingNewServer(false)}
+                            className="px-3 py-1.5 text-xs text-slate-400 hover:text-white"
+                          >
+                            انصراف
+                          </button>
+                        )}
+                        <button
+                          type="submit"
+                          disabled={isSavingCustomServer}
+                          className="px-4 py-1.5 bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-bold rounded-xl shadow-md flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+                        >
+                          {isSavingCustomServer ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Check className="w-3.5 h-3.5" />}
+                          <span>ثبت و ذخیره این سرور و کلیدها</span>
+                        </button>
+                      </div>
+                    </form>
+                  )}
+
+                  {/* Registered Custom Servers Cards */}
+                  {customServersList.length > 0 && (
+                    <div className="flex flex-col gap-2.5">
+                      <span className="text-xs font-bold text-slate-300 flex items-center gap-1.5">
+                        <Server className="w-4 h-4 text-cyan-400" />
+                        <span>سرورهای کاستوم ثبت‌شده:</span>
+                      </span>
+
+                      <div className="grid grid-cols-1 gap-2.5">
+                        {customServersList.map((srv) => {
+                          const keysCount = Array.isArray(srv.apiKeys) && srv.apiKeys.length > 0
+                            ? srv.apiKeys.length
+                            : (srv.apiKey ? 1 : 0);
+
+                          return (
+                            <div
+                              key={srv.id}
+                              className={`p-3.5 rounded-2xl border transition-all flex flex-col md:flex-row md:items-center justify-between gap-3 ${
+                                srv.isEnabled !== false
+                                  ? 'bg-slate-900/90 border-slate-800 hover:border-cyan-500/40'
+                                  : 'bg-slate-950/60 border-slate-800/60 opacity-60'
+                              }`}
+                            >
+                              <div className="flex flex-col gap-1 min-w-0">
+                                <div className="flex items-center gap-2 flex-wrap">
+                                  <span className="font-bold text-white text-xs sm:text-sm">
+                                    {srv.name}
+                                  </span>
+                                  <span className="px-2 py-0.5 rounded-md text-[10px] font-mono bg-cyan-500/15 text-cyan-300 border border-cyan-500/30">
+                                    {srv.model}
+                                  </span>
+                                  <span className="px-2 py-0.5 rounded-md text-[10px] font-bold bg-amber-500/15 text-amber-300 border border-amber-500/30">
+                                    {keysCount} کلید فعال
+                                  </span>
+                                  <span className={`px-2 py-0.5 rounded-md text-[10px] font-bold border ${
+                                    srv.isEnabled !== false
+                                      ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30'
+                                      : 'bg-slate-800 text-slate-400 border-slate-700'
+                                  }`}>
+                                    {srv.isEnabled !== false ? '✓ فعال در ترجمه' : 'غیرفعال'}
+                                  </span>
+                                </div>
+
+                                <div className="flex items-center gap-2 text-[11px] text-slate-400 font-mono truncate max-w-lg mt-0.5">
+                                  <span className="text-slate-500">آدرس:</span>
+                                  <span className="text-slate-300 truncate">{srv.baseUrl}</span>
+                                </div>
+                              </div>
+
+                              <div className="flex items-center gap-2 shrink-0 self-end md:self-center flex-wrap">
+                                <button
+                                  type="button"
+                                  onClick={() => handleTestCustomServer(srv)}
+                                  disabled={testingCustomServerId === srv.id}
+                                  className="px-3 py-1.5 rounded-xl bg-cyan-500/10 hover:bg-cyan-500/20 text-cyan-300 border border-cyan-500/30 text-xs font-bold transition-colors cursor-pointer flex items-center gap-1.5"
+                                  title="تست اتصال زنده و محاسبه زمان تاخیر سرور واسط"
+                                >
+                                  {testingCustomServerId === srv.id ? (
+                                    <Loader2 className="w-3.5 h-3.5 animate-spin text-cyan-400" />
+                                  ) : (
+                                    <Play className="w-3.5 h-3.5 text-cyan-400" />
+                                  )}
+                                  <span>تست زنده تاخیر</span>
+                                </button>
+
+                                <button
+                                  type="button"
+                                  onClick={() => handleToggleCustomServer(srv.id)}
+                                  className={`px-3 py-1.5 rounded-xl text-xs font-bold border transition-colors cursor-pointer ${
+                                    srv.isEnabled !== false
+                                      ? 'bg-amber-500/10 text-amber-300 border-amber-500/30 hover:bg-amber-500/20'
+                                      : 'bg-emerald-500/10 text-emerald-300 border-emerald-500/30 hover:bg-emerald-500/20'
+                                  }`}
+                                >
+                                  {srv.isEnabled !== false ? 'غیرفعال‌سازی' : 'فعال‌سازی'}
+                                </button>
+
+                                <button
+                                  type="button"
+                                  onClick={() => handleDeleteCustomServer(srv.id, srv.name)}
+                                  className="p-1.5 rounded-xl bg-slate-800 hover:bg-rose-500/20 text-slate-400 hover:text-rose-400 border border-slate-700 hover:border-rose-500/30 transition-colors cursor-pointer"
+                                  title="حذف این سرور"
+                                >
+                                  <Trash2 className="w-4 h-4" />
+                                </button>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  )}
                 </div>
 
                 {/* Fallback Save Footer */}
@@ -5061,7 +5773,11 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
                           <span className="w-6 h-6 rounded-md bg-slate-800 text-slate-300 flex items-center justify-center font-bold text-[11px]">
                             {cue.id}
                           </span>
-                          <span className="text-slate-300 dir-ltr">{cue.startTime} ➔ {cue.endTime}</span>
+                          <span dir="ltr" className="text-slate-300 font-mono inline-flex items-center gap-1.5" style={{ direction: 'ltr' }}>
+                            <span>{cue.startTime}</span>
+                            <span className="text-slate-500">➔</span>
+                            <span>{cue.endTime}</span>
+                          </span>
                         </div>
                         {!isProper ? (
                           <span className="text-[10px] font-bold px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/30 flex items-center gap-1 font-sans">
