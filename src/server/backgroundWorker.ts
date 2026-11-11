@@ -37,6 +37,11 @@ import {
   recordProviderPing,
   getProviderPings,
   setPriorityOrder,
+  getUnifiedKeys,
+  leaseAvailableUnifiedKey,
+  deleteUnifiedKey,
+  purgeInvalidKeys,
+  UnifiedKeyEntry,
   ServerSubtitleProject 
 } from './database';
 import { isCueProperlyTranslated } from '../lib/subtitleParser';
@@ -315,7 +320,8 @@ export interface WorkerStatus {
 let lastWorkerStatusMessage = 'موتور ترجمه چندمسیره پس‌زمینه آماده است (مدل اصلی: Gemini 3.1 Flash Lite با موازی‌سازی ۱۹ کلید).';
 
 export function getWorkerStatus(): WorkerStatus {
-  const allKeys = getServerKeys();
+  const unifiedKeys = getUnifiedKeys();
+  const allKeys = unifiedKeys.length > 0 ? unifiedKeys.map((k) => k.key) : getServerKeys();
   const db = getDatabase();
   const config = getServerConfig();
 
@@ -346,7 +352,7 @@ export function getWorkerStatus(): WorkerStatus {
     const isComp = p.status === 'completed' || (p.totalCues > 0 && p.translatedCues >= p.totalCues);
     const pct = isComp ? 100 : (p.totalCues > 0 ? Math.min(99, Math.floor((p.translatedCues / p.totalCues) * 100)) : 0);
     const workerKey = p.workerKeyUsed || '';
-    const keyMasked = workerKey.length > 8 ? workerKey.substring(0, 4) + '...' + workerKey.substring(workerKey.length - 4) : 'کلید سرور';
+    const keyMasked = workerKey.length > 8 ? workerKey.substring(0, 4) + '...' + workerKey.substring(workerKey.length - 4) : (workerKey || 'کلید هوش مصنوعی');
     return {
       id: p.id,
       name: p.name,
@@ -384,14 +390,14 @@ export function getWorkerStatus(): WorkerStatus {
   // Determine diagnostic reason if progress is stalled:
   let stuckReason: string | undefined = undefined;
   if (allKeys.length === 0) {
-    stuckReason = 'هیچ کلید API در استخر سرور ثبت نشده است. لطفاً در بخش کلیدهای سرور، کلید Gemini وارد کنید.';
+    stuckReason = 'هیچ کلید API در استخر سرور ثبت نشده است. لطفاً در بخش مدیریت استخر، کلید Gemini یا سرور واسط وارد کنید.';
   } else if (activeKeysCount === 0 && incompleteProjectCount > 0) {
     if (dailyExhaustedCount >= allKeys.length) {
-      stuckReason = `تمامی ${allKeys.length} کلید استخر، سهمیه روزانه (Daily Quota) خود را تمام کرده‌اند و تا فردا یا افزودن کلید جدید امکان ترجمه ندارند.`;
+      stuckReason = `تمامی ${allKeys.length} کلید استخر، سهمیه روزانه (Daily Quota) خود را تمام کرده‌اند و با کلید جدید یا چرخش بعدی ادامه می‌یابد.`;
     } else if (dailyExhaustedCount > 0) {
       stuckReason = `${dailyExhaustedCount} کلید سهمیه روزانه را تمام کرده‌اند و مابقی ${minuteExhaustedCount} کلید در استراحت موقت دقیقه (RPM) هستند.`;
     } else {
-      stuckReason = 'تمامی کلیدها موقتاً به سقف درخواست در دقیقه (RPM) رسیده‌اند و در استراحت کوتاه ۴۵ ثانیه‌ای هستند.';
+      stuckReason = 'تمامی کلیدها موقتاً به سقف درخواست در دقیقه (RPM) رسیده‌اند و در استراحت کوتاه هستند.';
     }
   }
 
@@ -602,20 +608,21 @@ function buildSubtitlePrompt(
       context.previousContextCues.map((c) => `- "${c.original}" -> "${c.translated}"`).join('\n') + '\n';
   }
 
-  const systemInstruction = `شما مترجم ارشد و حرفه‌ای زیرنویس فیلم، سریال و مستندهای اپیزودیک (نظیر مستندهای افشای کیهانی و فیلم‌های بلند ۳۰ الی ۴۰ دقیقه‌ای) هستید.
-${folderHeader}${videoHeader}زبان مقصد: ${targetLanguage === 'fa' ? 'فارسی' : targetLanguage}
+  const systemInstruction = `شما مترجم ارشد و حرفه‌ای زیرنویس فیلم، سریال و مستندهای اپیزودیک (نظیر مستندهای افشای کیهانی و فیلم‌های علمی و داستانی) هستید.
+${folderHeader}${videoHeader}زبان مقصد: ${targetLanguage === 'fa' ? 'فارسی روان، اصیل و سلیس' : targetLanguage}
 لحن ترجمه: ${selectedTone}${customPrompt ? `\nدستور اختصاصی کاربر: ${customPrompt}` : ''}
 ${previousContextStr}
-دستورالعمل‌های حیاتی با دقت بالا:
-۱. پیوستگی و درک عمیق موضوع: با توجه به موضوع کل ویدیو و سیر دیالوگ‌ها، مفاهیم علمی، کیهانی، روایی، فلسفی و تخصصی را با درک زمینه سخن گوینده، به روان‌ترین و دقیق‌ترین فارسی برگردانید.
-۲. تطابق دقیق ۱ به ۱ شناسه‌ها: هر شناسه ورودی (id) باید دقیقاً یک شناسه در خروجی داشته باشد. ادغام چند سطر در یک سطر یا حذف حتی یک سطر اکیداً ممنوع است.
-۳. تایم‌بندی و ترتیب سطرها کاملاً ثابت است و هرگز تغییر نمی‌کند؛ شما فقط متن ترجمه را در فیلد text قرار می‌دهید.
-۴. تگ‌های زیرنویس نظیر <i>, </i>, <b>, </b>, {\an8} و شکست خطوط \n دقیقاً در جای مناسب خود حفظ شوند.
-۵. ترجمه ۱۰۰٪ اجباری به خط و زبان فارسی: تمام دیالوگ‌ها، اسامی خاص، افکت‌های صوتی و اصطلاحات باید به فارسی برگردانده شوند:
-   - افکت‌های صوتی نظیر [Music], (Applause), [Laughter], [Sighs] را دقیقاً با معادل فارسی بنویسید (مثلاً [موسیقی]، [تشویق]، [خنده]، [آه]).
-   - اسامی خاص، مخفف‌ها و نام افراد را با حروف فارسی بنویسید (مثلاً NASA -> ناسا، CIA -> سیا، John -> جان، OK -> بسیارخب).
-   - رها کردن کلمات یا عبارات با حروف لاتین انگلیسی اکیداً ممنوع است و خروجی باید تماماً فارسی باشد.
-۶. خروجی فقط و فقط یک شیء JSON معتبر به فرمت زیر باشد (بدون هیچ کلمه اضافی در ابتدا یا انتها):
+دستورالعمل‌های فوق‌العاده حیاتی:
+۱. ترجمه مفهومی و معنایی اصیل: دیالوگ‌ها را با فهم دقیق موضوع به زیباترین و روان‌ترین زبان مادری فارسی برگردانید.
+۲. اکیداً ممنوع: هرگز کلمات انگلیسی را با حروف فارسی هجی، آوانگاری صوتی یا نویسه‌گردانی نکنید (هیچ‌گونه فینگلیش یا آوانگاری واژگان مجاز نیست)!
+   - مثال‌های غلط و ممنوع: نوشتن کلماتی مثل "پراوپویلسایاون"، "تیکه‌ناولاوگایایس"، "ماجاورایتی"، "تهاوسای"، "اینواولوای"، "سیستایمس".
+   - ترجمه صحیح فارسی: "سامانه‌های پیشران"، "فناوری‌ها"، "اکثریت"، "آن‌ها"، "شامل شدن"، "سامانه‌ها".
+۳. تنها اسامی خاص اشخاص یا سازمان‌های معروف را با املای استاندارد فارسی بنویسید (مانند ناسا، کرامر، جان).
+۴. تطابق دقیق ۱ به ۱ شناسه‌ها: هر شناسه ورودی (id) باید دقیقاً یک شناسه در خروجی داشته باشد. ادغام چند سطر یا حذف حتی یک سطر اکیداً ممنوع است.
+۵. تایم‌بندی و ترتیب سطرها کاملاً ثابت است و هرگز تغییر نمی‌کند؛ شما فقط متن ترجمه را در فیلد text قرار می‌دهید.
+۶. تگ‌های زیرنویس نظیر <i>, </i>, <b>, </b>, {\an8} و شکست خطوط \n حفظ شوند.
+۷. افکت‌های صوتی نظیر [Music], (Applause), [Laughter] را با معادل فارسی بنویسید (مثلاً [موسیقی]، [تشویق]، [خنده]).
+۸. خروجی فقط و فقط یک شیء JSON معتبر به فرمت زیر باشد (بدون هیچ توضیح، مقدمه یا کلمه اضافی):
 {"translations":[{"id":1,"text":"متن ترجمه شده روان و باکیفیت"}]}`;
 
   const userContent = JSON.stringify(items);
@@ -685,6 +692,265 @@ export function parseTranslationsJson(
 }
 
 /**
+ * Translate a batch with a single unified key (Gemini, Custom/DeepSeek, OpenAI, Claude)
+ */
+export async function translateWithUnifiedKey(
+  unifiedKey: UnifiedKeyEntry,
+  items: Array<{ id: number; text: string }>,
+  targetLanguage: string,
+  tone?: string,
+  customPrompt?: string,
+  context?: SubtitlePromptContext
+): Promise<{
+  translations: Array<{ id: number; text: string }>;
+  tokens: { prompt: number; candidates: number; total: number };
+  keyUsed: string;
+} | null> {
+  const { systemInstruction, userContent } = buildSubtitlePrompt(items, targetLanguage, tone, customPrompt, context);
+
+  // 1. Google Gemini Provider
+  if (unifiedKey.provider === 'gemini') {
+    const modelToUse = unifiedKey.model || activeTranslationModel || PRIMARY_MODEL;
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 55000);
+    const startTime = Date.now();
+
+    try {
+      const ai = createGenAI(unifiedKey.key);
+      const response = await ai.models.generateContent({
+        model: modelToUse,
+        contents: userContent,
+        config: {
+          systemInstruction,
+          responseMimeType: 'application/json',
+          thinkingConfig: { thinkingBudget: 0 },
+          abortSignal: controller.signal,
+        },
+      });
+      clearTimeout(timeoutId);
+
+      const rawText = response.text || '';
+      const finalTranslations = parseTranslationsJson(rawText, items, targetLanguage);
+      if (finalTranslations.length > 0) {
+        const latencyMs = Date.now() - startTime;
+        unifiedKey.latencyMs = latencyMs;
+        const usage = response.usageMetadata;
+        return {
+          translations: finalTranslations,
+          tokens: {
+            prompt: usage?.promptTokenCount || 0,
+            candidates: usage?.candidatesTokenCount || 0,
+            total: usage?.totalTokenCount || 0,
+          },
+          keyUsed: unifiedKey.maskedKey,
+        };
+      }
+      throw new Error('پاسخ مدل نامعتبر یا خالی بود.');
+    } catch (err: any) {
+      clearTimeout(timeoutId);
+      const msg = String(err?.message || err);
+      const is401 = msg.includes('401') || msg.toLowerCase().includes('deleted or disabled') || msg.toLowerCase().includes('bound service account') || msg.toLowerCase().includes('invalid api key') || msg.toLowerCase().includes('api_key_invalid');
+      if (is401) {
+        console.warn(`[BackgroundWorker] Gemini key ${unifiedKey.maskedKey} returned 401. Auto-purging from DB!`);
+        markKeyAsDisabled(unifiedKey.key, '401 Invalid/Deleted key');
+        deleteUnifiedKey(unifiedKey.id);
+      } else {
+        const isDaily = isDailyQuotaError(msg);
+        markKeyAsExhausted(unifiedKey.key, isDaily ? 'Daily limit' : 'RPM limit', isDaily);
+      }
+      return null;
+    }
+  }
+
+  // 2. Custom Broker / Private Server (DeepSeek, OneAPI, OpenAI-compatible proxy)
+  if (unifiedKey.provider === 'custom') {
+    const startTime = Date.now();
+    const baseUrl = (unifiedKey.baseUrl || 'https://api.deepseek.com/v1').replace(/\/+$/, '');
+    const url = baseUrl.endsWith('/chat/completions') ? baseUrl : `${baseUrl}/chat/completions`;
+    const model = unifiedKey.model || 'deepseek-chat';
+    const controller = new AbortController();
+    // Patient wait for intermediate broker proxies: 90 seconds
+    const timeoutId = setTimeout(() => controller.abort(), 90000);
+
+    try {
+      console.log(`[CustomBroker] Dispatching batch (${items.length} cues) to ${unifiedKey.name} (${model})...`);
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${unifiedKey.key.trim()}`,
+        },
+        body: JSON.stringify({
+          model,
+          messages: [
+            { role: 'system', content: systemInstruction },
+            { role: 'user', content: userContent },
+          ],
+          temperature: 0.3,
+        }),
+        signal: controller.signal,
+      });
+      clearTimeout(timeoutId);
+
+      if (res.ok) {
+        const data = await res.json();
+        const content = data.choices?.[0]?.message?.content || '';
+        const parsed = parseTranslationsJson(content, items, targetLanguage);
+        if (parsed.length > 0) {
+          const latencyMs = Date.now() - startTime;
+          unifiedKey.latencyMs = latencyMs;
+          const promptTok = data.usage?.prompt_tokens || 0;
+          const compTok = data.usage?.completion_tokens || 0;
+          const totalTok = data.usage?.total_tokens || (promptTok + compTok);
+
+          return {
+            translations: parsed,
+            tokens: { prompt: promptTok, candidates: compTok, total: totalTok },
+            keyUsed: `${unifiedKey.name} (${unifiedKey.maskedKey})`,
+          };
+        }
+      }
+
+      if (res.status === 401) {
+        console.warn(`[CustomBroker] Custom key ${unifiedKey.maskedKey} returned 401. Auto-purging from DB!`);
+        markKeyAsDisabled(unifiedKey.key, 'Custom Broker 401 Unauthorized');
+        deleteUnifiedKey(unifiedKey.id);
+      } else if (res.status === 429) {
+        markKeyAsExhausted(unifiedKey.key, 'Broker 429 Rate Limit', false);
+      } else {
+        const errText = await res.text().catch(() => '');
+        console.warn(`[CustomBroker] Error ${res.status}: ${errText.slice(0, 150)}`);
+        markKeyAsExhausted(unifiedKey.key, `HTTP ${res.status}`, false);
+      }
+      return null;
+    } catch (err: any) {
+      clearTimeout(timeoutId);
+      console.warn(`[CustomBroker] Network error: ${err?.message || err}`);
+      markKeyAsExhausted(unifiedKey.key, 'Timeout/Network error', false);
+      return null;
+    }
+  }
+
+  // 3. OpenAI Provider
+  if (unifiedKey.provider === 'openai') {
+    const startTime = Date.now();
+    const model = unifiedKey.model || 'gpt-4o-mini';
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 60000);
+
+    try {
+      const res = await fetch('https://api.openai.com/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${unifiedKey.key.trim()}`,
+        },
+        body: JSON.stringify({
+          model,
+          messages: [
+            { role: 'system', content: systemInstruction },
+            { role: 'user', content: userContent },
+          ],
+        }),
+        signal: controller.signal,
+      });
+      clearTimeout(timeoutId);
+
+      if (res.ok) {
+        const data = await res.json();
+        const content = data.choices?.[0]?.message?.content || '';
+        const parsed = parseTranslationsJson(content, items, targetLanguage);
+        if (parsed.length > 0) {
+          const latencyMs = Date.now() - startTime;
+          unifiedKey.latencyMs = latencyMs;
+          const promptTok = data.usage?.prompt_tokens || 0;
+          const compTok = data.usage?.completion_tokens || 0;
+          const totalTok = data.usage?.total_tokens || (promptTok + compTok);
+          return {
+            translations: parsed,
+            tokens: { prompt: promptTok, candidates: compTok, total: totalTok },
+            keyUsed: `OpenAI (${unifiedKey.maskedKey})`,
+          };
+        }
+      }
+
+      if (res.status === 401) {
+        console.warn(`[OpenAI] Key ${unifiedKey.maskedKey} returned 401. Auto-purging from DB!`);
+        markKeyAsDisabled(unifiedKey.key, 'OpenAI 401');
+        deleteUnifiedKey(unifiedKey.id);
+      } else if (res.status === 429) {
+        markKeyAsExhausted(unifiedKey.key, 'OpenAI Quota/Rate Limit (429)', true);
+      }
+      return null;
+    } catch (err: any) {
+      clearTimeout(timeoutId);
+      markKeyAsExhausted(unifiedKey.key, 'OpenAI error', false);
+      return null;
+    }
+  }
+
+  // 4. Claude Provider
+  if (unifiedKey.provider === 'claude') {
+    const startTime = Date.now();
+    const model = unifiedKey.model || 'claude-3-5-haiku-20241022';
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 60000);
+
+    try {
+      const res = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-api-key': unifiedKey.key.trim(),
+          'anthropic-version': '2023-06-01',
+        },
+        body: JSON.stringify({
+          model,
+          max_tokens: 4096,
+          system: systemInstruction,
+          messages: [{ role: 'user', content: userContent }],
+        }),
+        signal: controller.signal,
+      });
+      clearTimeout(timeoutId);
+
+      if (res.ok) {
+        const data = await res.json();
+        const content = data.content?.[0]?.text || '';
+        const parsed = parseTranslationsJson(content, items, targetLanguage);
+        if (parsed.length > 0) {
+          const latencyMs = Date.now() - startTime;
+          unifiedKey.latencyMs = latencyMs;
+          const promptTok = data.usage?.input_tokens || 0;
+          const compTok = data.usage?.output_tokens || 0;
+          const totalTok = promptTok + compTok;
+          return {
+            translations: parsed,
+            tokens: { prompt: promptTok, candidates: compTok, total: totalTok },
+            keyUsed: `Claude (${unifiedKey.maskedKey})`,
+          };
+        }
+      }
+
+      if (res.status === 401) {
+        console.warn(`[Claude] Key ${unifiedKey.maskedKey} returned 401. Auto-purging from DB!`);
+        markKeyAsDisabled(unifiedKey.key, 'Claude 401');
+        deleteUnifiedKey(unifiedKey.id);
+      } else if (res.status === 429) {
+        markKeyAsExhausted(unifiedKey.key, 'Claude Rate Limit (429)', false);
+      }
+      return null;
+    } catch (err: any) {
+      clearTimeout(timeoutId);
+      markKeyAsExhausted(unifiedKey.key, 'Claude error', false);
+      return null;
+    }
+  }
+
+  return null;
+}
+
+/**
  * Execute translation of a single batch using a leased API key with auto-fallback to alternate keys,
  * multi-model cascade for 503 high demand spikes, and verification that no cue is skipped or dropped.
  */
@@ -701,6 +967,39 @@ export async function translateBatchWithDedicatedKey(
   tokens: { prompt: number; candidates: number; total: number };
   keyUsed: string;
 }> {
+  const unifiedKeys = getUnifiedKeys();
+
+  if (unifiedKeys.length > 0) {
+    let keyQueue: UnifiedKeyEntry[] = [];
+    if (primaryKey) {
+      const match = unifiedKeys.find((k) => k.id === primaryKey || k.key === primaryKey);
+      if (match) {
+        keyQueue.push(match);
+      }
+    }
+    unifiedKeys.forEach((k) => {
+      if (!keyQueue.some((q) => q.id === k.id)) {
+        keyQueue.push(k);
+      }
+    });
+
+    for (const keyEntry of keyQueue) {
+      if (!keyEntry.isEnabled || isKeyDisabled(keyEntry.key) || isKeyExhausted(keyEntry.key)) {
+        continue;
+      }
+
+      try {
+        const res = await translateWithUnifiedKey(keyEntry, items, targetLanguage, tone, customPrompt, context);
+        if (res && res.translations.length > 0) {
+          return res;
+        }
+      } catch (err: any) {
+        console.warn(`[UnifiedPool] Key ${keyEntry.maskedKey} failed, advancing to next key: ${err?.message || err}`);
+      }
+    }
+  }
+
+  // Fallback to legacy providers cascade if unifiedKeys empty or exhausted
   const fallbackConfig = getFallbackAIConfig();
   const strategy = fallbackConfig.providerStrategy || 'lowest_ping';
   const orderedProviders = getOrderedProviders(strategy, fallbackConfig.priorityOrder);
@@ -1617,7 +1916,8 @@ async function processTick(): Promise<void> {
   try {
     const db = getDatabase();
     const config = getServerConfig();
-    const allKeys = getServerKeys();
+    const unifiedKeys = getUnifiedKeys();
+    const allKeys = unifiedKeys.length > 0 ? unifiedKeys.map((k) => k.key) : getServerKeys();
 
     // If no keys configured, do not dispatch
     if (allKeys.length === 0) return;
@@ -1859,8 +2159,9 @@ async function processTick(): Promise<void> {
       const availableCues = untranslatedCues.filter((c) => !inFlightCueKeys.has(project.id + '_' + c.id));
       if (availableCues.length === 0) continue;
 
-      // Lease a dedicated key from the pool (excluding keys currently busy by other files)
-      const keyInfo = leaseAvailableKey(Array.from(busyKeys));
+      // Lease a dedicated key from the unified pool (excluding keys currently busy by other files)
+      const leasedUnified = leaseAvailableUnifiedKey(Array.from(busyKeys));
+      const keyInfo = leasedUnified ? { key: leasedUnified.key } : leaseAvailableKey(Array.from(busyKeys));
       if (!keyInfo) break; // All remaining keys are either busy, exhausted, or disabled
 
       const leasedKey = keyInfo.key;
@@ -1893,7 +2194,7 @@ async function processTick(): Promise<void> {
 
       project.status = 'translating';
       project.hasDisruption = false;
-      project.workerKeyUsed = leasedKey;
+      project.workerKeyUsed = leasedUnified ? `${leasedUnified.name} (${leasedUnified.maskedKey})` : leasedKey;
       scheduleSaveDatabase();
 
       void (async () => {
