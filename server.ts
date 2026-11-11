@@ -123,7 +123,31 @@ const _dirname = typeof __dirname !== 'undefined'
 let PROD_STATIC_STATE: 'build' | 'missing' | 'dev' = 'dev';
 
 const app = express();
-const PORT = Number(process.env.PORT) || 3000;
+
+// AI Studio dev server runs on port 3000. Support CLI flag (--port 3000) or PORT env with 3000 default.
+function resolvePort(): number {
+  const portArgIndex = process.argv.indexOf('--port');
+  if (portArgIndex !== -1 && process.argv[portArgIndex + 1]) {
+    const p = parseInt(process.argv[portArgIndex + 1], 10);
+    if (!isNaN(p) && p > 0) return p;
+  }
+  // In development, default strictly to 3000 and avoid collision with Cloud Run's 8080 proxy
+  if (process.env.NODE_ENV !== 'production') {
+    const envPort = process.env.PORT ? parseInt(process.env.PORT, 10) : 3000;
+    if (envPort === 8080) return 3000;
+    return envPort || 3000;
+  }
+  return Number(process.env.PORT) || 3000;
+}
+
+const PORT = resolvePort();
+
+process.on('uncaughtException', (err) => {
+  console.error('[Server] Uncaught Exception:', err);
+});
+process.on('unhandledRejection', (reason, promise) => {
+  console.error('[Server] Unhandled Rejection at:', promise, 'reason:', reason);
+});
 
 // Dynamic CORS configuration (default: open to all hosts/origins '*')
 app.use((req, res, next) => {
@@ -3687,7 +3711,10 @@ async function startServer() {
   if (!isProduction) {
     console.log('[Server] Starting in DEVELOPMENT mode with Vite middleware...');
     viteServer = await createViteServer({
-      server: { middlewareMode: true },
+      server: {
+        middlewareMode: true,
+        hmr: process.env.DISABLE_HMR === 'true' ? false : undefined,
+      },
       appType: 'spa',
     });
     app.use(viteServer.middlewares);
