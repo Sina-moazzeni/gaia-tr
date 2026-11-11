@@ -249,14 +249,16 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
   const [addKeySectionTab, setAddKeySectionTab] = useState<'batch_main' | 'broker_custom'>('batch_main');
   const [batchProviderType, setBatchProviderType] = useState<'gemini' | 'openai' | 'claude'>('gemini');
   const [batchProviderKeysText, setBatchProviderKeysText] = useState('');
-  const [batchProviderModel, setBatchProviderModel] = useState('gemini-2.5-flash');
+  const [batchProviderModel, setBatchProviderModel] = useState('gemini-3.5-flash-lite');
+  const [isManualBatchModel, setIsManualBatchModel] = useState(false);
   const [isAddingBatchKeys, setIsAddingBatchKeys] = useState(false);
   const [brokerName, setBrokerName] = useState('سرور واسط DeepSeek');
   const [brokerBaseUrl, setBrokerBaseUrl] = useState('https://api.deepseek.com/v1');
   const [brokerModel, setBrokerModel] = useState('deepseek-chat');
   const [brokerKeysText, setBrokerKeysText] = useState('');
   const [isAddingBrokerServer, setIsAddingBrokerServer] = useState(false);
-  const [batchUnifiedModel, setBatchUnifiedModel] = useState('gemini-2.5-flash');
+  const [batchUnifiedModel, setBatchUnifiedModel] = useState('gemini-3.5-flash-lite');
+  const [isManualBatchChangeModel, setIsManualBatchChangeModel] = useState(false);
 
   // Server & Network Configuration Modal
   const [isServerConfigOpen, setIsServerConfigOpen] = useState(false);
@@ -4775,36 +4777,109 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
                     </div>
 
                     <div>
-                      <label className="text-[11px] font-medium text-slate-400 mb-1 block">مدل هوش مصنوعی</label>
-                      {batchProviderType === 'gemini' ? (
+                      <div className="flex items-center justify-between mb-1">
+                        <label className="text-[11px] font-medium text-slate-400 block">مدل هوش مصنوعی</label>
+                        <button
+                          type="button"
+                          onClick={() => setIsManualBatchModel(!isManualBatchModel)}
+                          className="text-[10px] text-indigo-400 hover:text-indigo-300 font-semibold cursor-pointer transition-colors"
+                        >
+                          {isManualBatchModel ? '← انتخاب از لیست' : '✎ ورود دستی مدل'}
+                        </button>
+                      </div>
+
+                      {isManualBatchModel ? (
+                        <div className="flex flex-col gap-1.5">
+                          <input
+                            type="text"
+                            value={batchProviderModel}
+                            onChange={(e) => setBatchProviderModel(e.target.value)}
+                            placeholder="مثال: gemini-3.5-flash-lite یا gemini-3.7-flash"
+                            dir="ltr"
+                            className="w-full bg-slate-900 border border-indigo-500/50 rounded-xl px-3 py-2 text-xs font-mono text-emerald-400 focus:outline-hidden focus:border-indigo-400 shadow-inner"
+                          />
+                          {batchProviderType === 'gemini' && (
+                            <div className="flex items-center gap-1 flex-wrap">
+                              <span className="text-[9px] text-slate-500">پیشنهادی:</span>
+                              {[
+                                'gemini-3.5-flash-lite',
+                                'gemini-3.7-flash',
+                                'gemini-2.5-flash',
+                                'gemini-2.5-flash-lite',
+                                'gemini-3.1-flash-lite',
+                                'gemini-2.5-pro',
+                              ].map((m) => (
+                                <button
+                                  key={m}
+                                  type="button"
+                                  onClick={() => setBatchProviderModel(m)}
+                                  className="text-[9px] font-mono px-1.5 py-0.5 rounded-md bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white transition-colors cursor-pointer"
+                                >
+                                  {m}
+                                </button>
+                              ))}
+                            </div>
+                          )}
+                        </div>
+                      ) : batchProviderType === 'gemini' ? (
                         <select
                           value={batchProviderModel}
-                          onChange={(e) => setBatchProviderModel(e.target.value)}
+                          onChange={(e) => {
+                            if (e.target.value === '__custom__') {
+                              setIsManualBatchModel(true);
+                              setBatchProviderModel('');
+                            } else {
+                              setBatchProviderModel(e.target.value);
+                            }
+                          }}
                           className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-hidden focus:border-indigo-500 font-mono"
                         >
+                          <option value="gemini-3.5-flash-lite">gemini-3.5-flash-lite (مدل ۳.۵ فلش لایت)</option>
+                          <option value="gemini-3.7-flash">gemini-3.7-flash (مدل ۳.۷ فلش - جدید و پرسرعت)</option>
                           <option value="gemini-2.5-flash">gemini-2.5-flash (توصیه‌شده)</option>
                           <option value="gemini-2.5-flash-lite">gemini-2.5-flash-lite (سریع و سبک)</option>
-                          <option value="gemini-2.5-pro">gemini-2.5-pro (دقت بالا)</option>
                           <option value="gemini-3.1-flash-lite">gemini-3.1-flash-lite</option>
+                          <option value="gemini-2.5-pro">gemini-2.5-pro (دقت بالا)</option>
+                          <option value="gemini-2.0-flash">gemini-2.0-flash</option>
+                          <option value="gemini-1.5-flash">gemini-1.5-flash</option>
+                          <option value="__custom__">✎ ورود دستی نام دلخواه مدل...</option>
                         </select>
                       ) : batchProviderType === 'openai' ? (
                         <select
                           value={batchProviderModel}
-                          onChange={(e) => setBatchProviderModel(e.target.value)}
+                          onChange={(e) => {
+                            if (e.target.value === '__custom__') {
+                              setIsManualBatchModel(true);
+                              setBatchProviderModel('');
+                            } else {
+                              setBatchProviderModel(e.target.value);
+                            }
+                          }}
                           className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-hidden focus:border-indigo-500 font-mono"
                         >
                           <option value="gpt-4o-mini">gpt-4o-mini (اقتصادی و بسیار سریع)</option>
                           <option value="gpt-4o">gpt-4o</option>
+                          <option value="o3-mini">o3-mini</option>
                           <option value="gpt-3.5-turbo">gpt-3.5-turbo</option>
+                          <option value="__custom__">✎ ورود دستی نام دلخواه مدل...</option>
                         </select>
                       ) : (
                         <select
                           value={batchProviderModel}
-                          onChange={(e) => setBatchProviderModel(e.target.value)}
+                          onChange={(e) => {
+                            if (e.target.value === '__custom__') {
+                              setIsManualBatchModel(true);
+                              setBatchProviderModel('');
+                            } else {
+                              setBatchProviderModel(e.target.value);
+                            }
+                          }}
                           className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-hidden focus:border-indigo-500 font-mono"
                         >
                           <option value="claude-3-5-haiku-20241022">claude-3-5-haiku-20241022 (سریع)</option>
+                          <option value="claude-3-7-sonnet-20250219">claude-3-7-sonnet-20250219 (جدیدترین کلود)</option>
                           <option value="claude-3-5-sonnet-20241022">claude-3-5-sonnet-20241022</option>
+                          <option value="__custom__">✎ ورود دستی نام دلخواه مدل...</option>
                         </select>
                       )}
                     </div>
@@ -5010,17 +5085,50 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
                       <Trash2 className="w-3.5 h-3.5" />
                       <span>حذف گروهی</span>
                     </button>
-                    <div className="flex items-center gap-1">
-                      <select
-                        value={batchUnifiedModel}
-                        onChange={(e) => setBatchUnifiedModel(e.target.value)}
-                        className="bg-slate-900 border border-slate-700 rounded-lg px-2 py-0.5 text-xs text-white font-mono"
-                      >
-                        <option value="gemini-2.5-flash">gemini-2.5-flash</option>
-                        <option value="gemini-2.5-flash-lite">gemini-2.5-flash-lite</option>
-                        <option value="deepseek-chat">deepseek-chat</option>
-                        <option value="gpt-4o-mini">gpt-4o-mini</option>
-                      </select>
+                    <div className="flex items-center gap-1.5 flex-wrap">
+                      {isManualBatchChangeModel ? (
+                        <div className="flex items-center gap-1">
+                          <input
+                            type="text"
+                            value={batchUnifiedModel}
+                            onChange={(e) => setBatchUnifiedModel(e.target.value)}
+                            placeholder="نام مدل دلخواه..."
+                            dir="ltr"
+                            className="bg-slate-900 border border-indigo-500/60 rounded-lg px-2.5 py-1 text-xs text-emerald-400 font-mono w-40 focus:outline-hidden"
+                          />
+                          <button
+                            type="button"
+                            onClick={() => setIsManualBatchChangeModel(false)}
+                            className="text-[10px] text-slate-400 hover:text-white px-1 cursor-pointer"
+                            title="بازگشت به لیست"
+                          >
+                            ✕
+                          </button>
+                        </div>
+                      ) : (
+                        <select
+                          value={batchUnifiedModel}
+                          onChange={(e) => {
+                            if (e.target.value === '__custom__') {
+                              setIsManualBatchChangeModel(true);
+                              setBatchUnifiedModel('');
+                            } else {
+                              setBatchUnifiedModel(e.target.value);
+                            }
+                          }}
+                          className="bg-slate-900 border border-slate-700 rounded-lg px-2 py-0.5 text-xs text-white font-mono"
+                        >
+                          <option value="gemini-3.5-flash-lite">gemini-3.5-flash-lite (سریع)</option>
+                          <option value="gemini-3.7-flash">gemini-3.7-flash (جدید)</option>
+                          <option value="gemini-2.5-flash">gemini-2.5-flash</option>
+                          <option value="gemini-2.5-flash-lite">gemini-2.5-flash-lite</option>
+                          <option value="gemini-2.5-pro">gemini-2.5-pro</option>
+                          <option value="deepseek-chat">deepseek-chat</option>
+                          <option value="gpt-4o-mini">gpt-4o-mini</option>
+                          <option value="claude-3-5-haiku-20241022">claude-3-5-haiku</option>
+                          <option value="__custom__">✎ ورود دستی مدل...</option>
+                        </select>
+                      )}
                       <button
                         type="button"
                         onClick={() => handleBatchSetModelUnifiedKeys(batchUnifiedModel)}
