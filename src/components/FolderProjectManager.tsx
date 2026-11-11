@@ -259,6 +259,7 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
   const [isAddingBrokerServer, setIsAddingBrokerServer] = useState(false);
   const [batchUnifiedModel, setBatchUnifiedModel] = useState('gemini-3.5-flash-lite');
   const [isManualBatchChangeModel, setIsManualBatchChangeModel] = useState(false);
+  const [isTestingAllKeys, setIsTestingAllKeys] = useState(false);
 
   // Server & Network Configuration Modal
   const [isServerConfigOpen, setIsServerConfigOpen] = useState(false);
@@ -843,6 +844,26 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
       await fetchUnifiedKeys();
     } catch {
       onShowToast('خطا در تست کلید', 'error');
+    }
+  };
+
+  const handleTestAllUnifiedKeys = async () => {
+    if (isTestingAllKeys) return;
+    try {
+      setIsTestingAllKeys(true);
+      onShowToast('در حال تست پینگ و اعتبار تمام کلیدها از روی سرور...', 'info');
+      const res = await fetch('/api/server/unified-keys/test-all', { method: 'POST' });
+      const data = await res.json();
+      if (data.success) {
+        onShowToast(data.message, data.purged > 0 ? 'warning' : 'success');
+      } else {
+        onShowToast(data.message || 'خطا در تست دسته‌جمعی کلیدها', 'error');
+      }
+      await fetchUnifiedKeys();
+    } catch {
+      onShowToast('خطا در برقراری ارتباط با سرور برای تست دسته‌جمعی', 'error');
+    } finally {
+      setIsTestingAllKeys(false);
     }
   };
 
@@ -2126,139 +2147,60 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
           </div>
         </div>
 
-        {/* Action Controls Toolbar - Fully Contained, Grouped & Wrapped so it never overflows */}
-        <div className="w-full pt-3.5 border-t border-slate-800/80 flex flex-wrap items-center justify-start gap-2">
-          {/* Action Group 1: Translation Execution */}
-          <button
-            type="button"
-            onClick={handleStopAllTranslations}
-            disabled={isStoppingAll}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold bg-rose-600/25 text-rose-300 hover:bg-rose-600/35 border border-rose-500/40 shadow-xs transition-all cursor-pointer"
-            title="توقف اضطراری کل عملیات ترجمه در تمامی پوشه‌ها و فایل‌ها (سطرهای قبلی ۱۰۰٪ حفظ می‌شوند)"
-          >
-            {isStoppingAll ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <StopCircle className="w-3.5 h-3.5 text-rose-400" />}
-            <span>توقف ترجمه‌ها</span>
-          </button>
+        {/* Action Controls Toolbar - Clean, Essential Controls */}
+        <div className="w-full pt-3.5 border-t border-slate-800/80 flex flex-wrap items-center justify-between gap-2.5">
+          <div className="flex items-center gap-2 flex-wrap">
+            <button
+              type="button"
+              onClick={handleResumeAllTranslations}
+              disabled={isResumingAll}
+              className="flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold bg-emerald-600 hover:bg-emerald-500 text-white shadow-lg shadow-emerald-600/30 transition-all cursor-pointer disabled:opacity-50 active:scale-98"
+              title="شروع و ادامه ترجمه تمام فایل‌ها در صف سرور به صورت خودکار و مستقل در پس‌زمینه"
+            >
+              {isResumingAll ? <Loader2 className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4 text-white fill-current" />}
+              <span>شروع / ادامه ترجمه تمام فایل‌ها</span>
+            </button>
 
-          <button
-            type="button"
-            onClick={handleResumeAllTranslations}
-            disabled={isResumingAll}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold bg-emerald-600/25 text-emerald-300 hover:bg-emerald-600/35 border border-emerald-500/40 shadow-xs transition-all cursor-pointer"
-            title="ادامه ترجمه تمام فایل‌های متوقف‌شده یا در انتظار در صف سرور"
-          >
-            {isResumingAll ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Play className="w-3.5 h-3.5 text-emerald-400 fill-current" />}
-            <span>ادامه کل فایل‌ها</span>
-          </button>
+            <button
+              type="button"
+              onClick={handleStopAllTranslations}
+              disabled={isStoppingAll}
+              className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-bold bg-rose-600/20 text-rose-300 hover:bg-rose-600/30 border border-rose-500/40 shadow-xs transition-all cursor-pointer disabled:opacity-50 active:scale-98"
+              title="توقف موقت عملیات ترجمه در تمامی پوشه‌ها و فایل‌ها (سطرهای ترجمه شده ۱۰۰٪ حفظ می‌شوند)"
+            >
+              {isStoppingAll ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <StopCircle className="w-3.5 h-3.5 text-rose-400" />}
+              <span>توقف ترجمه‌ها</span>
+            </button>
+          </div>
 
-          <button
-            type="button"
-            onClick={() => handleRetryIncomplete(activeView === 'inside_folder' ? selectedFolderId : undefined)}
-            disabled={isRetryingIncomplete}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold bg-amber-500/25 text-amber-300 hover:bg-amber-500/35 border border-amber-500/40 shadow-xs transition-all cursor-pointer"
-            title="رفع خودکار اختلالات سهمیه، خطاها و ادامه ترجمه تمام فایل‌های ناقص"
-          >
-            {isRetryingIncomplete ? <Loader2 className="w-3.5 h-3.5 animate-spin text-amber-400" /> : <RotateCcw className="w-3.5 h-3.5 text-amber-400" />}
-            <span>🛠️ رفع خطای فایل‌های ناقص</span>
-          </button>
+          <div className="flex items-center gap-2 flex-wrap">
+            <button
+              type="button"
+              onClick={() => {
+                void fetchUnifiedKeys();
+                fetchServerKeys();
+                setIsKeysModalOpen(true);
+              }}
+              className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-semibold bg-indigo-500/20 text-indigo-300 hover:bg-indigo-500/30 border border-indigo-500/30 transition-colors shadow-xs cursor-pointer active:scale-98"
+              title="مدیریت استخر یکپارچه کلیدهای هوش مصنوعی و تست سلامت"
+            >
+              <Key className="w-3.5 h-3.5 text-amber-400" />
+              <span>استخر کلیدها ({unifiedKeysList.length > 0 ? unifiedKeysList.length : serverKeysCount} فعال)</span>
+            </button>
 
-          <button
-            type="button"
-            onClick={handleTurboComplete}
-            disabled={isTurboCompleting}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold bg-indigo-500/25 text-indigo-300 hover:bg-indigo-500/35 border border-indigo-500/40 shadow-xs transition-all cursor-pointer"
-            title="تکمیل فوری و اولویت‌دار فایل‌های ناقص (۹۸٪ به بالا) بدون معطلی و با رفع خودکار افکت‌های صوتی"
-          >
-            {isTurboCompleting ? (
-              <Loader2 className="w-3.5 h-3.5 animate-spin text-indigo-400" />
-            ) : (
-              <Sparkles className="w-3.5 h-3.5 text-indigo-400" />
-            )}
-            <span>⚡ تکمیل فوری سطرها (توربو)</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={handleClearCache}
-            disabled={isClearingCache}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-bold bg-rose-500/15 text-rose-300 hover:bg-rose-500/25 border border-rose-500/40 shadow-xs transition-all cursor-pointer"
-            title="پاکسازی کش سرور، قفل‌های موقت و استراحت کلیدها بدون حذف زیرنویس‌ها"
-          >
-            {isClearingCache ? (
-              <Loader2 className="w-3.5 h-3.5 animate-spin text-rose-400" />
-            ) : (
-              <RotateCcw className="w-3.5 h-3.5 text-rose-400" />
-            )}
-            <span>🧹 پاکسازی کش (حفظ زیرنویس)</span>
-          </button>
-
-          <span className="hidden sm:inline-block w-px h-5 bg-slate-800 mx-0.5" />
-
-          {/* Action Group 2: Database & Audit */}
-          <button
-            type="button"
-            onClick={handleDownloadBackup}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold bg-slate-800/80 text-cyan-300 hover:bg-slate-800 hover:text-cyan-200 border border-cyan-500/30 transition-colors shadow-xs cursor-pointer"
-            title="دانلود فایل پشتیبان کامل دیتابیس سرور شامل تمام پروژه‌ها و زیرنویس‌ها"
-          >
-            <Download className="w-3.5 h-3.5 text-cyan-400" />
-            <span>پشتیبان‌گیری (Backup)</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => setIsRestoreModalOpen(true)}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold bg-slate-800/80 text-amber-300 hover:bg-slate-800 hover:text-amber-200 border border-amber-500/30 transition-colors shadow-xs cursor-pointer"
-            title="بازیابی کل دیتابیس از فایل JSON پشتیبان (با پشتیبانی از فایل‌های سنگین)"
-          >
-            <UploadCloud className="w-3.5 h-3.5 text-amber-400" />
-            <span>بازیابی (Restore)</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={handleAuditAndFixEnglish}
-            disabled={isAuditing}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold bg-emerald-500/15 text-emerald-300 hover:bg-emerald-500/25 border border-emerald-500/30 transition-colors shadow-xs cursor-pointer"
-            title="بررسی دقیق تمام زیرنویس‌ها برای یافتن هرگونه سطر انگلیسی باقی‌مانده و ترجمه مجدد ۱۰۰٪ فارسی آن‌ها"
-          >
-            {isAuditing ? (
-              <Loader2 className="w-3.5 h-3.5 animate-spin text-emerald-400" />
-            ) : (
-              <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" />
-            )}
-            <span>رفع سطور انگلیسی</span>
-          </button>
-
-          <span className="hidden sm:inline-block w-px h-5 bg-slate-800 mx-0.5" />
-
-          {/* Action Group 3: Server & Key Management */}
-          <button
-            type="button"
-            onClick={() => {
-              void fetchUnifiedKeys();
-              fetchServerKeys();
-              setIsKeysModalOpen(true);
-            }}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold bg-indigo-500/20 text-indigo-300 hover:bg-indigo-500/30 border border-indigo-500/30 transition-colors shadow-xs cursor-pointer"
-            title="مدیریت استخر یکپارچه کلیدهای هوش مصنوعی، اولویت‌بندی و چرخش خودکار"
-          >
-            <Key className="w-3.5 h-3.5 text-amber-400" />
-            <span>استخر کلیدها ({unifiedKeysList.length > 0 ? unifiedKeysList.length : serverKeysCount} فعال)</span>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => {
-              fetchServerConfig();
-              setIsServerConfigOpen(true);
-            }}
-            className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold bg-slate-800/80 text-violet-300 hover:bg-slate-800 hover:text-violet-200 border border-violet-500/30 transition-colors shadow-xs cursor-pointer"
-            title="تنظیمات دامنه مجاز (ALLOWED_ORIGIN)، پراکسی جمینای (GEMINI_BASE_URL) و تعداد ترجمه همزمان"
-          >
-            <Settings className="w-3.5 h-3.5 text-violet-400" />
-            <span>تنظیمات سرور</span>
-          </button>
+            <button
+              type="button"
+              onClick={() => {
+                fetchServerConfig();
+                setIsServerConfigOpen(true);
+              }}
+              className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-semibold bg-slate-800/80 text-violet-300 hover:bg-slate-800 hover:text-violet-200 border border-violet-500/30 transition-colors shadow-xs cursor-pointer active:scale-98"
+              title="تنظیمات دامنه مجاز (ALLOWED_ORIGIN)، پراکسی و تعداد فایل همزمان"
+            >
+              <Settings className="w-3.5 h-3.5 text-violet-400" />
+              <span>تنظیمات سرور</span>
+            </button>
+          </div>
         </div>
       </div>
 
@@ -4681,6 +4623,17 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
             {/* Quick Action Toolbar */}
             <div className="flex items-center justify-between flex-wrap gap-2.5 bg-slate-950/60 border border-slate-800/80 rounded-2xl p-3">
               <div className="flex items-center gap-2 flex-wrap">
+                <button
+                  type="button"
+                  onClick={handleTestAllUnifiedKeys}
+                  disabled={isTestingAllKeys}
+                  className="px-4 py-2 rounded-xl text-xs font-bold text-white bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 shadow-md shadow-emerald-600/30 border border-emerald-400/40 transition-all flex items-center gap-2 cursor-pointer disabled:opacity-50 active:scale-95"
+                  title="تست سلامت، پینگ و اعتبار تمام کلیدهای هوش مصنوعی استخر به صورت همزمان از روی سرور"
+                >
+                  {isTestingAllKeys ? <Loader2 className="w-4 h-4 animate-spin text-white" /> : <Sparkles className="w-4 h-4 text-emerald-200" />}
+                  <span>⚡ تست دسته‌جمعی همه APIها (یک‌مرتبه)</span>
+                </button>
+
                 <button
                   type="button"
                   onClick={handlePurgeInvalidKeys}

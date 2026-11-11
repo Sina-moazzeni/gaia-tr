@@ -543,21 +543,26 @@ export async function testServerKey(apiKey: string): Promise<{
 
   const isDeletedOrDisabled =
     msg.includes('401') ||
+    msg.toLowerCase().includes('suspended') ||
+    msg.toLowerCase().includes('consumer has been suspended') ||
+    msg.toLowerCase().includes('permission denied') ||
+    msg.toLowerCase().includes('permission_denied') ||
     msg.toLowerCase().includes('deleted or disabled') ||
     msg.toLowerCase().includes('bound service account') ||
-    msg.toLowerCase().includes('service account is deleted');
+    msg.toLowerCase().includes('service account is deleted') ||
+    msg.toLowerCase().includes('invalid api key') ||
+    msg.toLowerCase().includes('api_key_invalid') ||
+    (msg.includes('403') && !msg.toLowerCase().includes('quota'));
 
   if (isDeletedOrDisabled) {
-    markKeyAsDisabled(cleanKey, 'سرویس‌اکانت یا کلید در گوگل غیرفعال/حذف شده (401)');
-    userMsg = '❌ این کلید یا سرویس‌اکانت در گوگل غیرفعال یا حذف شده است (401) و خودکار از استخر فعال خارج شد.';
+    markKeyAsDisabled(cleanKey, 'پروژه گوگل معلق شده یا کلید نامعتبر است (403/401)');
+    userMsg = '❌ این کلید یا پروژه گوگل غیرفعال، معلق یا حذف شده است (403/401) و خودکار از استخر حذف شد.';
   } else if (isDaily) {
     markKeyAsExhausted(cleanKey, `اتمام سهمیه روزانه: ${msg}`, true);
     userMsg = '🔴 سهمیه روزانه (Daily Quota / Requests Per Day) این کلید به اتمام رسیده است و تا ریست روزانه گوگل از چرخه ترجمه خارج شد تا مانع پیشرفت کار نشود.';
   } else if (msg.includes('429') || msg.toLowerCase().includes('quota') || msg.toLowerCase().includes('resource_exhausted')) {
     markKeyAsExhausted(cleanKey, `محدودیت موقت دقیقه: ${msg}`, false);
     userMsg = '🟡 سقف درخواست در دقیقه (RPM) این کلید موقتاً پر شده است. در استراحت کوتاه ۴۵ ثانیه‌ای قرار گرفت.';
-  } else if (msg.includes('403') || msg.toLowerCase().includes('invalid api key')) {
-    userMsg = 'کلید API نامعتبر است (Authentication / API Key Invalid). لطفاً از صحت کلید اطمینان حاصل فرمایید.';
   } else if (msg.includes('503') || msg.toLowerCase().includes('high demand')) {
     userMsg = 'سرورهای جمینای گوگل با ترافیک مقطعی روبرو هستند (503). اتصال در تلاش بعدی بازیابی می‌شود.';
   }
@@ -716,10 +721,11 @@ export async function translateWithUnifiedKey(
   if (unifiedKey.provider === 'gemini') {
     const modelToUse = unifiedKey.model || activeTranslationModel || PRIMARY_MODEL;
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 55000);
+    const timeoutId = setTimeout(() => controller.abort(), 28000);
     const startTime = Date.now();
 
     try {
+      recordKeyCall(unifiedKey.key);
       const ai = createGenAI(unifiedKey.key);
       const response = await ai.models.generateContent({
         model: modelToUse,
@@ -727,7 +733,6 @@ export async function translateWithUnifiedKey(
         config: {
           systemInstruction,
           responseMimeType: 'application/json',
-          thinkingConfig: { thinkingBudget: 0 },
           abortSignal: controller.signal,
         },
       });
@@ -753,14 +758,29 @@ export async function translateWithUnifiedKey(
     } catch (err: any) {
       clearTimeout(timeoutId);
       const msg = String(err?.message || err);
-      const is401 = msg.includes('401') || msg.toLowerCase().includes('deleted or disabled') || msg.toLowerCase().includes('bound service account') || msg.toLowerCase().includes('invalid api key') || msg.toLowerCase().includes('api_key_invalid');
-      if (is401) {
-        console.warn(`[BackgroundWorker] Gemini key ${unifiedKey.maskedKey} returned 401. Auto-purging from DB!`);
-        markKeyAsDisabled(unifiedKey.key, '401 Invalid/Deleted key');
+      const isPermanentlyDead =
+        msg.includes('401') ||
+        msg.toLowerCase().includes('suspended') ||
+        msg.toLowerCase().includes('consumer has been suspended') ||
+        msg.toLowerCase().includes('permission denied') ||
+        msg.toLowerCase().includes('permission_denied') ||
+        msg.toLowerCase().includes('deleted or disabled') ||
+        msg.toLowerCase().includes('bound service account') ||
+        msg.toLowerCase().includes('invalid api key') ||
+        msg.toLowerCase().includes('api_key_invalid') ||
+        (msg.includes('403') && !msg.toLowerCase().includes('quota'));
+      const isRateLimit = msg.includes('429') || msg.toLowerCase().includes('quota') || msg.toLowerCase().includes('resource_exhausted') || msg.toLowerCase().includes('rate limit');
+
+      if (isPermanentlyDead) {
+        console.warn(`[BackgroundWorker] Gemini key ${unifiedKey.maskedKey} is permanently suspended/disabled (${msg.slice(0, 120)}). Auto-purging from DB!`);
+        markKeyAsDisabled(unifiedKey.key, 'Google project suspended or key invalid (403/401)');
         deleteUnifiedKey(unifiedKey.id);
-      } else {
+      } else if (isRateLimit) {
         const isDaily = isDailyQuotaError(msg);
         markKeyAsExhausted(unifiedKey.key, isDaily ? 'Daily limit' : 'RPM limit', isDaily);
+      } else {
+        console.warn(`[BackgroundWorker] Non-quota error on key ${unifiedKey.maskedKey}: ${msg.slice(0, 150)}. Marking short rest so next key takes over.`);
+        markKeyAsExhausted(unifiedKey.key, `خطای شبکه/سرویس: ${msg.slice(0, 80)}`, false);
       }
       return null;
     }
@@ -1001,6 +1021,12 @@ export async function translateBatchWithDedicatedKey(
         console.warn(`[UnifiedPool] Key ${keyEntry.maskedKey} failed, advancing to next key: ${err?.message || err}`);
       }
     }
+
+    // If all unified keys are in temporary RPM cooldown or exhausted, do not throw fatal cascade failure
+    const allUnifiedExhausted = unifiedKeys.every((k) => !k.isEnabled || isKeyDisabled(k.key) || isKeyExhausted(k.key));
+    if (allUnifiedExhausted) {
+      throw new Error('تمامی کلیدها موقتاً به سقف درخواست در دقیقه (RPM) رسیده‌اند و در استراحت کوتاه هستند.');
+    }
   }
 
   // Fallback to legacy providers cascade if unifiedKeys empty or exhausted
@@ -1132,9 +1158,6 @@ export async function translateWithGeminiProvider(
           config: {
             systemInstruction,
             responseMimeType: 'application/json',
-            thinkingConfig: {
-              thinkingBudget: 0,
-            },
             abortSignal: controller.signal,
           },
         });
@@ -1189,10 +1212,15 @@ export async function translateWithGeminiProvider(
 
         const isPermanentlyDisabledKey =
           msg.includes('401') ||
+          msg.toLowerCase().includes('suspended') ||
+          msg.toLowerCase().includes('consumer has been suspended') ||
+          msg.toLowerCase().includes('permission denied') ||
+          msg.toLowerCase().includes('permission_denied') ||
           msg.toLowerCase().includes('deleted or disabled') ||
           msg.toLowerCase().includes('bound service account') ||
           msg.toLowerCase().includes('invalid api key') ||
-          msg.toLowerCase().includes('api_key_invalid');
+          msg.toLowerCase().includes('api_key_invalid') ||
+          (msg.includes('403') && !msg.toLowerCase().includes('quota'));
 
         const isRateLimit =
           msg.includes('429') ||
@@ -1201,21 +1229,17 @@ export async function translateWithGeminiProvider(
           msg.toLowerCase().includes('tokens') ||
           msg.toLowerCase().includes('rate limit');
 
-        const isOtherAuth =
-          msg.includes('403') ||
-          msg.toLowerCase().includes('permission_denied') ||
-          msg.toLowerCase().includes('unauthorized');
-
         if (isPermanentlyDisabledKey) {
-          markKeyAsDisabled(currentKey, 'سرویس‌اکانت یا کلید گوگل غیرفعال/حذف شده (401)');
+          console.warn(`[BackgroundWorker] Key ${currentKey.slice(0, 6)}... is permanently dead/suspended (${msg.slice(0, 120)}). Purging!`);
+          markKeyAsDisabled(currentKey, 'پروژه گوگل معلق شده یا کلید نامعتبر است (403/401)');
           keyFailedWithRateOrAuth = true;
           break;
-        } else if (isRateLimit || isOtherAuth) {
+        } else if (isRateLimit) {
           const isDaily = isDailyQuotaError(msg);
           if (isDaily) {
             markKeyAsExhausted(currentKey, `اتمام سهمیه روزانه گوگل: ${msg.slice(0, 100)}`, true);
           } else {
-            markKeyAsExhausted(currentKey, isRateLimit ? 'محدودیت موقت دقیقه (429)' : 'عدم دسترسی (403)', false);
+            markKeyAsExhausted(currentKey, 'محدودیت موقت دقیقه (429)', false);
           }
           keyFailedWithRateOrAuth = true;
           break;
@@ -1819,6 +1843,23 @@ async function processProjectChunkBatch(
     scheduleSaveDatabase();
   } catch (err: any) {
     const errMsg = err?.message || String(err);
+    const isTemporaryExhaustion =
+      errMsg.includes('صف اولویت') ||
+      errMsg.includes('429') ||
+      errMsg.includes('quota') ||
+      errMsg.includes('resource_exhausted') ||
+      errMsg.includes('RESOURCE_EXHAUSTED') ||
+      errMsg.includes('استراحت') ||
+      allKeys.every((k) => isKeyExhausted(k));
+
+    if (isTemporaryExhaustion) {
+      console.log(`[BackgroundWorker] Temporary rate-limit rest for ${project.name}. Resuming automatically once cooldown finishes.`);
+      project.status = 'queued';
+      project.lastError = 'سهمیه موقت دقیقه کلیدهای سرور در حال استراحت (۴۵ ثانیه) است. ترجمه خودکار به زودی ادامه می‌یابد.';
+      project.errorMessage = undefined;
+      return;
+    }
+
     console.error(`[BackgroundWorker] Batch error for ${project.name}:`, errMsg);
 
     // Auto-rescue cues that repeatedly fail so the project is NEVER stuck:
@@ -2166,8 +2207,12 @@ async function processTick(): Promise<void> {
       const availableCues = untranslatedCues.filter((c) => !inFlightCueKeys.has(project.id + '_' + c.id));
       if (availableCues.length === 0) continue;
 
-      // Lease a dedicated key from the unified pool (excluding keys currently busy by other files)
-      const leasedUnified = leaseAvailableUnifiedKey(Array.from(busyKeys));
+      // Lease a dedicated key from the unified pool (excluding keys currently busy or in short RPM gap)
+      const busyOrRateLimited = [...Array.from(busyKeys), ...allKeys.filter((k) => isKeyRateLimited(k))];
+      let leasedUnified = leaseAvailableUnifiedKey(busyOrRateLimited);
+      if (!leasedUnified) {
+        leasedUnified = leaseAvailableUnifiedKey(Array.from(busyKeys));
+      }
       const keyInfo = leasedUnified ? { key: leasedUnified.key } : leaseAvailableKey(Array.from(busyKeys));
       if (!keyInfo) break; // All remaining keys are either busy, exhausted, or disabled
 
@@ -2264,8 +2309,12 @@ export function startBackgroundWorker(): void {
   if (workerInterval) return;
   console.log('⚡ [BackgroundWorker] Subtitle Autonomous Parallel Translation Engine started.');
 
-  // Clean stale 'translating' status from any previous server sessions
+  // Clean stale 'translating' status and reset cooldowns from previous server sessions
   try {
+    resetAllKeyCooldowns(true);
+    resetWorkerExhaustionBackoff();
+    clearAllStuckLocks();
+
     const db = getDatabase();
     let cleaned = 0;
     db.projects.forEach((p) => {
@@ -2273,10 +2322,14 @@ export function startBackgroundWorker(): void {
         p.status = 'queued';
         cleaned++;
       }
+      if (p.lastError && p.lastError.includes('استراحت')) {
+        p.lastError = undefined;
+        p.errorMessage = undefined;
+      }
     });
     if (cleaned > 0) {
       saveDatabaseSync();
-      console.log(`[BackgroundWorker] Cleaned ${cleaned} stale 'translating' projects to 'queued'.`);
+      console.log(`[BackgroundWorker] Cleaned ${cleaned} stale 'translating' projects to 'queued' and reset key cooldowns.`);
     }
   } catch (err) {
     console.error('[BackgroundWorker] Startup cleanup error:', err);

@@ -84,6 +84,7 @@ import {
   purgeInvalidKeys,
   updateUnifiedKey,
   batchSetModelUnifiedKeys,
+  markKeyAsDisabled,
   UnifiedKeyEntry,
   ProviderType,
   ServerSubtitleProject
@@ -3137,51 +3138,158 @@ app.post('/api/server/unified-keys/test/:id', async (req, res) => {
     const target = keys.find((k) => k.id === id);
     if (!target) return res.status(404).json({ success: false, error: 'Key not found' });
 
-    const start = Date.now();
-    let isOk = false;
-    let message = '';
-
+    let testRes: { success: boolean; latencyMs: number; message: string; error?: string };
     if (target.provider === 'gemini') {
-      try {
-        const ai = new GoogleGenAI({ apiKey: target.key });
-        const resp = await ai.models.generateContent({
-          model: target.model || 'gemini-2.5-flash',
-          contents: 'Ping test',
-          config: { maxOutputTokens: 5 },
-        });
-        isOk = Boolean(resp.text);
-        message = isOk ? 'اتصال به Gemini موفق بود.' : 'پاسخ خالی از Gemini دریافت شد.';
-      } catch (e: any) {
-        message = e?.message || String(e);
-        if (message.includes('401') || message.includes('API_KEY_INVALID')) {
-          deleteUnifiedKey(target.id);
-          return res.json({ success: false, latencyMs: Date.now() - start, message: 'کلید نامعتبر (401) بود و به طور خودکار پاک شد.', isPurged: true });
-        }
-      }
+      testRes = await testServerKey(target.key);
     } else {
-      const result = await testFallbackProvider(
+      testRes = await testFallbackProvider(
         target.provider === 'custom' ? 'custom' : (target.provider === 'openai' ? 'openai' : 'claude'),
         target.key,
         { baseUrl: target.baseUrl, model: target.model }
       );
-      isOk = result.success;
-      message = result.message;
-      if (!isOk && (message.includes('401') || String(result.error).includes('401'))) {
-        deleteUnifiedKey(target.id);
-        return res.json({ success: false, latencyMs: result.latencyMs, message: 'کلید نامعتبر (401) بود و به طور خودکار پاک شد.', isPurged: true });
-      }
     }
 
-    const latencyMs = Date.now() - start;
-    updateUnifiedKey(target.id, { latencyMs });
+    const combinedMsg = `${testRes.message || ''} ${testRes.error || ''}`.toLowerCase();
+    const isDead =
+      combinedMsg.includes('401') ||
+      combinedMsg.includes('api_key_invalid') ||
+      combinedMsg.includes('suspended') ||
+      combinedMsg.includes('consumer has been suspended') ||
+      combinedMsg.includes('permission denied') ||
+      combinedMsg.includes('permission_denied') ||
+      (combinedMsg.includes('403') && !combinedMsg.includes('quota'));
+
+    if (isDead) {
+      markKeyAsDisabled(target.key, 'Invalid or Suspended (403/401)');
+      deleteUnifiedKey(target.id);
+      return res.json({
+        success: false,
+        latencyMs: testRes.latencyMs,
+        message: 'این کلید در گوگل یا سرویس‌دهنده مسدود/غیرفعال شده بود و خودکار از استخر حذف شد.',
+        isPurged: true,
+      });
+    }
+
+    updateUnifiedKey(target.id, {
+      latencyMs: testRes.success ? testRes.latencyMs : target.latencyMs,
+      lastError: testRes.success ? undefined : testRes.message.slice(0, 100),
+    });
 
     return res.json({
-      success: isOk,
-      latencyMs,
-      message: isOk ? `تست موفق (${latencyMs}ms): ${message}` : `خطا در اتصال: ${message}`,
+      success: testRes.success,
+      latencyMs: testRes.latencyMs,
+      message: testRes.message,
     });
   } catch (err: any) {
     return res.status(500).json({ success: false, error: err?.message });
+  }
+});
+
+// Test ALL unified keys in batch (one-click batch test)
+app.post('/api/server/unified-keys/test-all', async (req, res) => {
+  try {
+    const keys = getUnifiedKeys();
+    if (!keys || keys.length === 0) {
+      return res.json({
+        success: true,
+        message: 'هیچ کلیدی در استخر ثبت نشده است.',
+        total: 0,
+        passed: 0,
+        failed: 0,
+        purged: 0,
+        results: [],
+      });
+    }
+
+    const results: Array<{
+      id: string;
+      maskedKey: string;
+      provider: string;
+      success: boolean;
+      latencyMs: number;
+      message: string;
+      isPurged?: boolean;
+    }> = [];
+
+    // Test keys in small parallel chunks (4 keys at a time)
+    const CHUNK_SIZE = 4;
+    for (let i = 0; i < keys.length; i += CHUNK_SIZE) {
+      const chunk = keys.slice(i, i + CHUNK_SIZE);
+      const chunkResults = await Promise.all(
+        chunk.map(async (target) => {
+          let testRes: { success: boolean; latencyMs: number; message: string; error?: string };
+          try {
+            if (target.provider === 'gemini') {
+              testRes = await testServerKey(target.key);
+            } else {
+              testRes = await testFallbackProvider(
+                target.provider === 'custom' ? 'custom' : (target.provider === 'openai' ? 'openai' : 'claude'),
+                target.key,
+                { baseUrl: target.baseUrl, model: target.model }
+              );
+            }
+          } catch (e: any) {
+            testRes = { success: false, latencyMs: 0, message: e?.message || 'خطای اتصال' };
+          }
+
+          const combinedMsg = `${testRes.message || ''} ${testRes.error || ''}`.toLowerCase();
+          const isDead =
+            combinedMsg.includes('401') ||
+            combinedMsg.includes('api_key_invalid') ||
+            combinedMsg.includes('suspended') ||
+            combinedMsg.includes('consumer has been suspended') ||
+            combinedMsg.includes('permission denied') ||
+            combinedMsg.includes('permission_denied') ||
+            (combinedMsg.includes('403') && !combinedMsg.includes('quota'));
+
+          if (isDead) {
+            markKeyAsDisabled(target.key, 'Invalid or Suspended (403/401)');
+            deleteUnifiedKey(target.id);
+            return {
+              id: target.id,
+              maskedKey: target.maskedKey,
+              provider: target.provider,
+              success: false,
+              latencyMs: testRes.latencyMs,
+              message: 'کلید مسدود/غیرفعال بود و خودکار پاک شد.',
+              isPurged: true,
+            };
+          }
+
+          updateUnifiedKey(target.id, {
+            latencyMs: testRes.success ? testRes.latencyMs : target.latencyMs,
+            lastError: testRes.success ? undefined : testRes.message.slice(0, 100),
+          });
+
+          return {
+            id: target.id,
+            maskedKey: target.maskedKey,
+            provider: target.provider,
+            success: testRes.success,
+            latencyMs: testRes.latencyMs,
+            message: testRes.message,
+            isPurged: false,
+          };
+        })
+      );
+      results.push(...chunkResults);
+    }
+
+    const passed = results.filter((r) => r.success).length;
+    const purged = results.filter((r) => r.isPurged).length;
+    const failed = results.filter((r) => !r.success && !r.isPurged).length;
+
+    return res.json({
+      success: true,
+      message: `تست دسته‌جمعی تکمیل شد: ${passed} کلید سالم و فعال، ${failed} دارای خطا/وقفه موقت، ${purged} کلید مسدود پاکسازی شد.`,
+      total: keys.length,
+      passed,
+      failed,
+      purged,
+      results,
+    });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message || 'خطا در تست دسته‌جمعی کلیدها' });
   }
 });
 

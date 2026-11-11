@@ -1703,9 +1703,18 @@ export function purgeInvalidKeys(): { purgedCount: number; purgedKeys: string[] 
   const db = getDatabase();
   const keys = getUnifiedKeys();
   const deadKeys: string[] = [];
-
   const remaining = keys.filter((k) => {
-    const isDead = isKeyDisabled(k.key) || disabledKeysMap.has(k.key) || k.lastError?.includes('401') || k.lastError?.includes('API_KEY_INVALID');
+    const errStr = (k.lastError || '').toLowerCase();
+    const isDead =
+      isKeyDisabled(k.key) ||
+      disabledKeysMap.has(k.key) ||
+      k.lastError?.includes('401') ||
+      k.lastError?.includes('API_KEY_INVALID') ||
+      errStr.includes('suspended') ||
+      errStr.includes('consumer has been suspended') ||
+      errStr.includes('permission denied') ||
+      errStr.includes('permission_denied') ||
+      (k.lastError?.includes('403') && !errStr.includes('quota'));
     if (isDead) {
       deadKeys.push(k.maskedKey);
       resetKeyCooldown(k.key);
@@ -1763,26 +1772,25 @@ export function batchSetModelUnifiedKeys(ids: string[], model: string): UnifiedK
   return getUnifiedKeys();
 }
 
+let lastLeasedUnifiedIndex = 0;
+
 export function leaseAvailableUnifiedKey(excludeKeyIds: string[] = []): UnifiedKeyEntry | null {
   const keys = getUnifiedKeys();
   if (keys.length === 0) return null;
 
   const excludedSet = new Set(excludeKeyIds);
+  const n = keys.length;
 
-  // 1st pass: Pick the highest priority key that is enabled, valid, unexhausted, and not busy
-  for (const entry of keys) {
+  // Round-robin pass: distribute files across all available unexhausted keys to prevent piling onto a single key
+  for (let offset = 0; offset < n; offset++) {
+    const idx = (lastLeasedUnifiedIndex + offset) % n;
+    const entry = keys[idx];
     if (!entry.isEnabled) continue;
     if (isKeyDisabled(entry.key)) continue;
     if (isKeyExhausted(entry.key)) continue;
-    if (excludedSet.has(entry.id)) continue;
-    return entry;
-  }
+    if (excludedSet.has(entry.id) || excludedSet.has(entry.key)) continue;
 
-  // 2nd pass: If all non-busy keys are exhausted, check if any non-exhausted key can be shared
-  for (const entry of keys) {
-    if (!entry.isEnabled) continue;
-    if (isKeyDisabled(entry.key)) continue;
-    if (isKeyExhausted(entry.key)) continue;
+    lastLeasedUnifiedIndex = (idx + 1) % n;
     return entry;
   }
 
