@@ -24,6 +24,8 @@ import {
   getServerConfig,
   getFallbackAIConfig,
   FallbackAIConfig,
+  getCustomServers,
+  CustomServerConfig,
   resetProjectTranslation,
   resetFolderTranslationFromScratch,
   recordKeyUsage,
@@ -695,6 +697,21 @@ export async function translateBatchWithDedicatedKey(
   tokens: { prompt: number; candidates: number; total: number };
   keyUsed: string;
 }> {
+  // If user selected "Custom Strategy", directly translate via custom servers/DeepSeek
+  const fallbackConfig = getFallbackAIConfig();
+  if (fallbackConfig.providerStrategy === 'custom') {
+    const customResult = await translateBatchWithFallbackProviders(
+      items,
+      targetLanguage,
+      tone,
+      customPrompt,
+      context
+    );
+    if (customResult) {
+      return customResult;
+    }
+  }
+
   const { systemInstruction, userContent } = buildSubtitlePrompt(items, targetLanguage, tone, customPrompt, context);
 
   const keysQueue = [primaryKey, ...candidateKeys.filter((k) => k !== primaryKey)].filter(Boolean) as string[];
@@ -999,51 +1016,94 @@ export async function translateBatchWithFallbackProviders(
     }
   }
 
-  // 3. Try Custom Provider if configured
-  if (fallbackConfig.customConfig?.baseUrl && fallbackConfig.customConfig?.apiKey) {
-    try {
-      const cfg = fallbackConfig.customConfig;
-      const baseUrl = cfg.baseUrl.replace(/\/+$/, '');
-      const url = baseUrl.endsWith('/chat/completions') ? baseUrl : `${baseUrl}/chat/completions`;
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), 20000);
-      const res = await fetch(url, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${cfg.apiKey.trim()}`,
-        },
-        body: JSON.stringify({
-          model: cfg.model || 'deepseek-chat',
-          messages: [
-            { role: 'system', content: systemInstruction },
-            { role: 'user', content: userContent },
-          ],
-          temperature: 0.3,
-        }),
-        signal: controller.signal,
-      });
-      clearTimeout(timeoutId);
+  // 3. Try Multiple Custom Providers & DeepSeek Proxy Brokers
+  // Supports multiple custom servers, multiple keys per server, and large broker latencies (up to 90s)
+  const customServers = getCustomServers().filter((s) => s.isEnabled !== false);
+  const allServers = [...customServers];
 
-      if (res.ok) {
-        const data = await res.json();
-        const content = data.choices?.[0]?.message?.content || '';
-        const parsed = parseTranslationsJson(content, items, targetLanguage);
-        if (parsed.length > 0) {
-          console.log(`[FallbackAI] Successfully translated batch via Custom Provider (${cfg.name || cfg.model})`);
-          return {
-            translations: parsed,
-            tokens: {
-              prompt: data.usage?.prompt_tokens || 0,
-              candidates: data.usage?.completion_tokens || 0,
-              total: data.usage?.total_tokens || 0,
-            },
-            keyUsed: `${cfg.name || 'Custom'}:${cfg.apiKey.slice(0, 6)}...`,
-          };
+  if (fallbackConfig.customConfig?.baseUrl && fallbackConfig.customConfig?.apiKey) {
+    const hasLegacy = allServers.some(
+      (s) => s.baseUrl === fallbackConfig.customConfig?.baseUrl && s.apiKey === fallbackConfig.customConfig?.apiKey
+    );
+    if (!hasLegacy) {
+      allServers.push({
+        id: 'legacy_cfg',
+        name: fallbackConfig.customConfig.name || 'سرویس سفارشی',
+        baseUrl: fallbackConfig.customConfig.baseUrl,
+        apiKey: fallbackConfig.customConfig.apiKey,
+        apiKeys: [fallbackConfig.customConfig.apiKey],
+        model: fallbackConfig.customConfig.model || 'deepseek-chat',
+        isEnabled: true,
+      });
+    }
+  }
+
+  for (const srv of allServers) {
+    if (!srv.baseUrl) continue;
+    const keys = Array.isArray(srv.apiKeys) && srv.apiKeys.length > 0
+      ? srv.apiKeys
+      : (srv.apiKey ? [srv.apiKey] : []);
+
+    for (const key of keys) {
+      if (!key || !key.trim()) continue;
+      try {
+        const baseUrl = srv.baseUrl.replace(/\/+$/, '');
+        const url = baseUrl.endsWith('/chat/completions') ? baseUrl : `${baseUrl}/chat/completions`;
+        const controller = new AbortController();
+        // Generous 90s timeout for intermediate broker proxies with high queuing latency
+        const timeoutId = setTimeout(() => controller.abort(), 90000);
+
+        console.log(`[CustomAI] Dispatching batch (${items.length} cues) to ${srv.name} (${srv.model}) via proxy... waiting for response.`);
+        const res = await fetch(url, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${key.trim()}`,
+          },
+          body: JSON.stringify({
+            model: srv.model || 'deepseek-chat',
+            messages: [
+              { role: 'system', content: systemInstruction },
+              { role: 'user', content: userContent },
+            ],
+            temperature: 0.3,
+          }),
+          signal: controller.signal,
+        });
+        clearTimeout(timeoutId);
+
+        if (res.ok) {
+          const data = await res.json();
+          const content = data.choices?.[0]?.message?.content || '';
+          const parsed = parseTranslationsJson(content, items, targetLanguage);
+          if (parsed.length > 0) {
+            console.log(`[CustomAI] Successfully received & verified translation from ${srv.name} (${srv.model})`);
+            const promptTok = data.usage?.prompt_tokens || 0;
+            const compTok = data.usage?.completion_tokens || 0;
+            const totalTok = data.usage?.total_tokens || (promptTok + compTok);
+
+            srv.requestsCount = (srv.requestsCount || 0) + 1;
+            srv.tokensCount = (srv.tokensCount || 0) + totalTok;
+
+            return {
+              translations: parsed,
+              tokens: {
+                prompt: promptTok,
+                candidates: compTok,
+                total: totalTok,
+              },
+              keyUsed: `${srv.name}:${key.slice(0, 6)}...`,
+            };
+          } else {
+            console.warn(`[CustomAI] Response from ${srv.name} did not contain valid translation JSON.`);
+          }
+        } else {
+          const errBody = await res.text().catch(() => '');
+          console.warn(`[CustomAI] ${srv.name} HTTP ${res.status}: ${errBody.slice(0, 120)}`);
         }
+      } catch (err: any) {
+        console.warn(`[CustomAI] ${srv.name} error: ${err?.message || err}`);
       }
-    } catch (err: any) {
-      console.warn(`[FallbackAI] Custom Provider error: ${err?.message || err}`);
     }
   }
 
@@ -1367,16 +1427,16 @@ async function processTick(): Promise<void> {
 
     const now = Date.now();
 
-    // Deadlock Watchdog: force-clear any cue or key that has been locked in flight for > 25 seconds
+    // Deadlock Watchdog: force-clear any cue or key that has been locked in flight for > 120 seconds (supports intermediate broker proxy latencies)
     for (const [key, ts] of inFlightCueTimestamps.entries()) {
-      if (now - ts > 25_000) {
+      if (now - ts > 120_000) {
         console.warn(`[BackgroundWorker] Watchdog: Auto-cleared stale in-flight cue lock: ${key}`);
         inFlightCueKeys.delete(key);
         inFlightCueTimestamps.delete(key);
       }
     }
     for (const [key, ts] of busyKeyTimestamps.entries()) {
-      if (now - ts > 25_000) {
+      if (now - ts > 120_000) {
         console.warn(`[BackgroundWorker] Watchdog: Auto-cleared stale busy key lock: ${key.slice(0, 6)}...`);
         busyKeys.delete(key);
         busyKeyTimestamps.delete(key);

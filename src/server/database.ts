@@ -65,6 +65,19 @@ export interface KeyUsageRecord {
   lastError?: string;
 }
 
+export interface CustomServerConfig {
+  id: string;
+  name: string;
+  baseUrl: string;
+  apiKey: string;
+  apiKeys?: string[]; // multiple keys for this proxy broker (e.g. dozens of DeepSeek broker keys)
+  model: string;
+  isEnabled?: boolean;
+  createdAt?: string;
+  requestsCount?: number;
+  tokensCount?: number;
+}
+
 export interface FallbackAIConfig {
   openaiKeys: string[];
   openaiModel: string; // e.g. 'gpt-4o-mini'
@@ -76,6 +89,7 @@ export interface FallbackAIConfig {
     model: string;
     name?: string;
   };
+  customServers?: CustomServerConfig[];
   providerStrategy: 'gemini_with_fallback' | 'gemini_only' | 'openai' | 'claude' | 'custom';
 }
 
@@ -87,6 +101,7 @@ export interface SubtitlesDatabase {
   activeKeyIndex: number;
   serverConfig?: ServerConfig;
   fallbackAiConfig?: FallbackAIConfig;
+  customServers?: CustomServerConfig[];
   keyStats?: Record<string, KeyUsageRecord>;
   stats: {
     totalTranslations: number;
@@ -178,6 +193,9 @@ function loadDatabaseFromDisk(): SubtitlesDatabase {
     }
     if (!parsed.stats) {
       parsed.stats = { totalTranslations: 0, totalTokensUsed: 0 };
+    }
+    if (!parsed.customServers || !Array.isArray(parsed.customServers)) {
+      parsed.customServers = [];
     }
     if (!parsed.serverConfig) {
       parsed.serverConfig = { ...DEFAULT_SERVER_CONFIG };
@@ -596,6 +614,174 @@ export function setClaudeKeys(keys: string[]): string[] {
 
 export function setCustomProviderConfig(cfg: { baseUrl: string; apiKey: string; model: string; name?: string }) {
   return updateFallbackAIConfig({ customConfig: cfg });
+}
+
+// ─── Custom AI Servers Pool (DeepSeek, Brokers, OneAPI, OpenRouter) ──────────
+
+export function getCustomServers(): CustomServerConfig[] {
+  const db = getDatabase();
+  if (!db.customServers) {
+    db.customServers = [];
+  }
+  // Auto-migrate single legacy customConfig if exists and list is empty
+  if (db.customServers.length === 0 && db.fallbackAiConfig?.customConfig?.baseUrl && db.fallbackAiConfig?.customConfig?.apiKey) {
+    const legacy = db.fallbackAiConfig.customConfig;
+    db.customServers.push({
+      id: 'cs_legacy',
+      name: legacy.name || 'DeepSeek واسط پیش‌فرض',
+      baseUrl: legacy.baseUrl,
+      apiKey: legacy.apiKey,
+      apiKeys: [legacy.apiKey],
+      model: legacy.model || 'deepseek-chat',
+      isEnabled: true,
+      createdAt: new Date().toISOString(),
+      requestsCount: 0,
+      tokensCount: 0,
+    });
+    saveDatabaseSync();
+  }
+  return db.customServers;
+}
+
+export function addCustomServer(data: {
+  name: string;
+  baseUrl: string;
+  apiKey?: string;
+  apiKeys?: string[];
+  model: string;
+  isEnabled?: boolean;
+}): CustomServerConfig {
+  const db = getDatabase();
+  if (!db.customServers) db.customServers = [];
+
+  const cleanKeys: string[] = [];
+  if (data.apiKey && data.apiKey.trim()) cleanKeys.push(data.apiKey.trim());
+  if (Array.isArray(data.apiKeys)) {
+    data.apiKeys.forEach((k) => {
+      const trimmed = k?.trim();
+      if (trimmed && !cleanKeys.includes(trimmed)) cleanKeys.push(trimmed);
+    });
+  }
+
+  const newServer: CustomServerConfig = {
+    id: `cs_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+    name: data.name?.trim() || 'سرور سفارشی DeepSeek',
+    baseUrl: data.baseUrl?.trim() || 'https://api.deepseek.com/v1',
+    apiKey: cleanKeys[0] || '',
+    apiKeys: cleanKeys,
+    model: data.model?.trim() || 'deepseek-chat',
+    isEnabled: data.isEnabled !== false,
+    createdAt: new Date().toISOString(),
+    requestsCount: 0,
+    tokensCount: 0,
+  };
+
+  db.customServers.push(newServer);
+
+  if (!db.fallbackAiConfig) db.fallbackAiConfig = { ...DEFAULT_FALLBACK_AI_CONFIG };
+  db.fallbackAiConfig.customServers = db.customServers;
+  if (!db.fallbackAiConfig.customConfig || !db.fallbackAiConfig.customConfig.apiKey) {
+    db.fallbackAiConfig.customConfig = {
+      baseUrl: newServer.baseUrl,
+      apiKey: newServer.apiKey,
+      model: newServer.model,
+      name: newServer.name,
+    };
+  }
+
+  saveDatabaseSync();
+  return newServer;
+}
+
+export function updateCustomServer(id: string, updates: Partial<CustomServerConfig>): CustomServerConfig | null {
+  const db = getDatabase();
+  const servers = getCustomServers();
+  const srv = servers.find((s) => s.id === id);
+  if (!srv) return null;
+
+  if (updates.name !== undefined) srv.name = updates.name.trim() || srv.name;
+  if (updates.baseUrl !== undefined) srv.baseUrl = updates.baseUrl.trim() || srv.baseUrl;
+  if (updates.model !== undefined) srv.model = updates.model.trim() || srv.model;
+  if (updates.isEnabled !== undefined) srv.isEnabled = updates.isEnabled;
+  if (updates.apiKeys !== undefined) {
+    const cleanKeys = updates.apiKeys.map((k) => k?.trim()).filter(Boolean);
+    srv.apiKeys = cleanKeys;
+    srv.apiKey = cleanKeys[0] || '';
+  } else if (updates.apiKey !== undefined) {
+    const trimmed = updates.apiKey.trim();
+    srv.apiKey = trimmed;
+    if (trimmed && (!srv.apiKeys || !srv.apiKeys.includes(trimmed))) {
+      srv.apiKeys = [trimmed, ...(srv.apiKeys || [])];
+    }
+  }
+
+  if (db.fallbackAiConfig) {
+    db.fallbackAiConfig.customServers = db.customServers;
+  }
+  saveDatabaseSync();
+  return srv;
+}
+
+export function deleteCustomServer(id: string): boolean {
+  const db = getDatabase();
+  if (!db.customServers) return false;
+  const initialLen = db.customServers.length;
+  db.customServers = db.customServers.filter((s) => s.id !== id);
+  if (db.fallbackAiConfig) {
+    db.fallbackAiConfig.customServers = db.customServers;
+  }
+  saveDatabaseSync();
+  return db.customServers.length < initialLen;
+}
+
+export function getAllCustomKeysFlat(): Array<{
+  serverId: string;
+  serverName: string;
+  baseUrl: string;
+  model: string;
+  rawKey: string;
+  maskedKey: string;
+  isEnabled: boolean;
+  requestsCount?: number;
+  tokensCount?: number;
+}> {
+  const servers = getCustomServers();
+  const list: Array<{
+    serverId: string;
+    serverName: string;
+    baseUrl: string;
+    model: string;
+    rawKey: string;
+    maskedKey: string;
+    isEnabled: boolean;
+    requestsCount?: number;
+    tokensCount?: number;
+  }> = [];
+
+  servers.forEach((srv) => {
+    const keys = Array.isArray(srv.apiKeys) && srv.apiKeys.length > 0
+      ? srv.apiKeys
+      : (srv.apiKey ? [srv.apiKey] : []);
+
+    keys.forEach((k) => {
+      if (!k || !k.trim()) return;
+      const len = k.length;
+      const maskedKey = len > 8 ? k.substring(0, 4) + '...' + k.substring(len - 4) : '****';
+      list.push({
+        serverId: srv.id,
+        serverName: srv.name,
+        baseUrl: srv.baseUrl,
+        model: srv.model,
+        rawKey: k,
+        maskedKey,
+        isEnabled: srv.isEnabled !== false,
+        requestsCount: srv.requestsCount || 0,
+        tokensCount: srv.tokensCount || 0,
+      });
+    });
+  });
+
+  return list;
 }
 
 // ─── Server Key Pool Operations ──────────────────────────────────────────────

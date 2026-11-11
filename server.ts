@@ -67,6 +67,12 @@ import {
   setProjectPriority,
   getDisabledKeysList,
   clearAllDisabledKeys,
+  getCustomServers,
+  addCustomServer,
+  updateCustomServer,
+  deleteCustomServer,
+  getAllCustomKeysFlat,
+  CustomServerConfig,
   ServerSubtitleProject
 } from './src/server/database';
 import {
@@ -2883,13 +2889,16 @@ app.post('/api/projects/:id/deprioritize', (req, res) => {
   }
 });
 
-// 17. Get server key rotation pool with full details
+// 17. Get server key rotation pool with full details (Gemini + Custom Servers / DeepSeek Brokers)
 app.get('/api/server/keys', (req, res) => {
   try {
     const allKeys = getServerKeys();
     const details = getServerKeysWithDetails();
     const masked = details.map((d) => d.maskedKey);
     const disabledList = getDisabledKeysList();
+    const customServers = getCustomServers();
+    const customKeys = getAllCustomKeysFlat();
+
     return res.json({
       success: true,
       count: allKeys.length,
@@ -2901,6 +2910,86 @@ app.get('/api/server/keys', (req, res) => {
         reason: d.reason,
         timestamp: d.timestamp,
       })),
+      customServers,
+      customKeys,
+      totalAllKeysCount: allKeys.length + customKeys.length,
+    });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message });
+  }
+});
+
+// 17-cs. Custom Servers CRUD & Management (Multiple DeepSeek / Proxy Brokers)
+app.get('/api/server/custom-servers', (req, res) => {
+  try {
+    const servers = getCustomServers();
+    const customKeys = getAllCustomKeysFlat();
+    return res.json({ success: true, servers, customKeys });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message });
+  }
+});
+
+app.post('/api/server/custom-servers', (req, res) => {
+  try {
+    const { name, baseUrl, apiKey, apiKeys, model, isEnabled } = req.body || {};
+    if (!baseUrl || (!apiKey && (!apiKeys || apiKeys.length === 0))) {
+      return res.status(400).json({ success: false, error: 'آدرس سرور و حداقل یک کلید API الزامی است.' });
+    }
+    const newServer = addCustomServer({ name, baseUrl, apiKey, apiKeys, model, isEnabled });
+    return res.json({
+      success: true,
+      server: newServer,
+      servers: getCustomServers(),
+      customKeys: getAllCustomKeysFlat(),
+      message: `سرور سفارشی «${newServer.name}» با موفقیت اضافه شد.`,
+    });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message });
+  }
+});
+
+app.put('/api/server/custom-servers/:id', (req, res) => {
+  try {
+    const updated = updateCustomServer(req.params.id, req.body || {});
+    if (!updated) return res.status(404).json({ success: false, error: 'سرور سفارشی یافت نشد.' });
+    return res.json({
+      success: true,
+      server: updated,
+      servers: getCustomServers(),
+      customKeys: getAllCustomKeysFlat(),
+      message: `سرور سفارشی «${updated.name}» با موفقیت بروزرسانی شد.`,
+    });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message });
+  }
+});
+
+app.delete('/api/server/custom-servers/:id', (req, res) => {
+  try {
+    deleteCustomServer(req.params.id);
+    return res.json({
+      success: true,
+      servers: getCustomServers(),
+      customKeys: getAllCustomKeysFlat(),
+      message: 'سرور سفارشی با موفقیت حذف شد.',
+    });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message });
+  }
+});
+
+app.post('/api/server/custom-servers/:id/toggle', (req, res) => {
+  try {
+    const servers = getCustomServers();
+    const srv = servers.find((s) => s.id === req.params.id);
+    if (!srv) return res.status(404).json({ success: false, error: 'سرور سفارشی یافت نشد.' });
+    const updated = updateCustomServer(srv.id, { isEnabled: !srv.isEnabled });
+    return res.json({
+      success: true,
+      server: updated,
+      servers: getCustomServers(),
+      customKeys: getAllCustomKeysFlat(),
     });
   } catch (err: any) {
     return res.status(500).json({ success: false, error: err?.message });
