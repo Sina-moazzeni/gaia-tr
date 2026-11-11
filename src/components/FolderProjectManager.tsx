@@ -47,7 +47,9 @@ import {
   ExternalLink,
   Replace,
   StopCircle,
-  Zap
+  Zap,
+  ArrowUp,
+  ArrowDown
 } from 'lucide-react';
 import { SubtitleItem, SubtitleFormat, ToneOption } from '../types';
 import { parseSubtitleFile, isCueProperlyTranslated } from '../lib/subtitleParser';
@@ -238,6 +240,23 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
   const [customKeyModelInput, setCustomKeyModelInput] = useState<string>('');
   const [isBatchDeletingKeys, setIsBatchDeletingKeys] = useState(false);
   const [isChangingPoolModel, setIsChangingPoolModel] = useState(false);
+
+  // Unified Keys Pool State (Single peer pool across Gemini, DeepSeek Brokers, OpenAI, Claude)
+  const [unifiedKeysList, setUnifiedKeysList] = useState<any[]>([]);
+  const [unifiedKeyFilter, setUnifiedKeyFilter] = useState<'all' | 'gemini' | 'custom' | 'openai' | 'claude'>('all');
+  const [selectedUnifiedIds, setSelectedUnifiedIds] = useState<string[]>([]);
+  const [isPurgingInvalid, setIsPurgingInvalid] = useState(false);
+  const [addKeySectionTab, setAddKeySectionTab] = useState<'batch_main' | 'broker_custom'>('batch_main');
+  const [batchProviderType, setBatchProviderType] = useState<'gemini' | 'openai' | 'claude'>('gemini');
+  const [batchProviderKeysText, setBatchProviderKeysText] = useState('');
+  const [batchProviderModel, setBatchProviderModel] = useState('gemini-2.5-flash');
+  const [isAddingBatchKeys, setIsAddingBatchKeys] = useState(false);
+  const [brokerName, setBrokerName] = useState('سرور واسط DeepSeek');
+  const [brokerBaseUrl, setBrokerBaseUrl] = useState('https://api.deepseek.com/v1');
+  const [brokerModel, setBrokerModel] = useState('deepseek-chat');
+  const [brokerKeysText, setBrokerKeysText] = useState('');
+  const [isAddingBrokerServer, setIsAddingBrokerServer] = useState(false);
+  const [batchUnifiedModel, setBatchUnifiedModel] = useState('gemini-2.5-flash');
 
   // Server & Network Configuration Modal
   const [isServerConfigOpen, setIsServerConfigOpen] = useState(false);
@@ -637,8 +656,19 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
   };
 
   // Fetch Keys Details
+  const fetchUnifiedKeys = async () => {
+    try {
+      const res = await fetch('/api/server/unified-keys');
+      const data = await res.json();
+      if (data.success && Array.isArray(data.keys)) {
+        setUnifiedKeysList(data.keys);
+      }
+    } catch {}
+  };
+
   const fetchServerKeys = async () => {
     try {
+      void fetchUnifiedKeys();
       const res = await fetch('/api/server/keys');
       const data = await res.json();
       if (data.success) {
@@ -654,6 +684,182 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
         }
       }
     } catch {}
+  };
+
+  const handleAddBatchKeys = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const cleanText = batchProviderKeysText.trim();
+    if (!cleanText) {
+      onShowToast('لطفاً حداقل یک کلید وارد کنید.', 'error');
+      return;
+    }
+    setIsAddingBatchKeys(true);
+    try {
+      const res = await fetch('/api/server/unified-keys/add', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          provider: batchProviderType,
+          rawKeys: cleanText,
+          model: batchProviderModel,
+          name: batchProviderType === 'gemini' ? 'Google Gemini' : (batchProviderType === 'openai' ? 'OpenAI GPT' : 'Anthropic Claude'),
+        }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        onShowToast(data.message || 'کلیدها با موفقیت به استخر افزوده شدند.', 'success');
+        setBatchProviderKeysText('');
+        await fetchUnifiedKeys();
+        await fetchServerKeys();
+      } else {
+        onShowToast(data.error || 'خطا در افزودن کلیدها', 'error');
+      }
+    } catch {
+      onShowToast('خطا در برقراری ارتباط با سرور', 'error');
+    } finally {
+      setIsAddingBatchKeys(false);
+    }
+  };
+
+  const handleAddBrokerKeys = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!brokerBaseUrl.trim()) {
+      onShowToast('آدرس سرور واسط (Base URL) الزامی است.', 'error');
+      return;
+    }
+    const cleanText = brokerKeysText.trim();
+    if (!cleanText) {
+      onShowToast('حداقل یک کلید برای سرور واسط وارد کنید.', 'error');
+      return;
+    }
+    setIsAddingBrokerServer(true);
+    try {
+      const res = await fetch('/api/server/unified-keys/add', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          provider: 'custom',
+          name: brokerName.trim() || 'سرور واسط',
+          baseUrl: brokerBaseUrl.trim(),
+          model: brokerModel.trim() || 'deepseek-chat',
+          rawKeys: cleanText,
+        }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        onShowToast(data.message || 'سرور و کلیدهای واسط با موفقیت اضافه شدند.', 'success');
+        setBrokerKeysText('');
+        await fetchUnifiedKeys();
+        await fetchServerKeys();
+      } else {
+        onShowToast(data.error || 'خطا در افزودن سرور واسط', 'error');
+      }
+    } catch {
+      onShowToast('خطا در برقراری ارتباط با سرور', 'error');
+    } finally {
+      setIsAddingBrokerServer(false);
+    }
+  };
+
+  const handleMoveKeyPriority = async (id: string, direction: 'up' | 'down') => {
+    try {
+      const res = await fetch('/api/server/unified-keys/move', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ id, direction }),
+      });
+      const data = await res.json();
+      if (data.success && Array.isArray(data.keys)) {
+        setUnifiedKeysList(data.keys);
+      }
+    } catch {}
+  };
+
+  const handleDeleteUnifiedKey = async (id: string) => {
+    try {
+      const res = await fetch(`/api/server/unified-keys/${id}`, { method: 'DELETE' });
+      const data = await res.json();
+      if (data.success) {
+        onShowToast(data.message || 'کلید حذف شد.', 'info');
+        await fetchUnifiedKeys();
+        await fetchServerKeys();
+      }
+    } catch {
+      onShowToast('خطا در حذف کلید', 'error');
+    }
+  };
+
+  const handleBatchDeleteUnifiedKeys = async () => {
+    if (selectedUnifiedIds.length === 0) return;
+    try {
+      const res = await fetch('/api/server/unified-keys/batch-delete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ids: selectedUnifiedIds }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        onShowToast(data.message || 'کلیدهای انتخاب‌شده حذف شدند.', 'info');
+        setSelectedUnifiedIds([]);
+        await fetchUnifiedKeys();
+        await fetchServerKeys();
+      }
+    } catch {
+      onShowToast('خطا در حذف گروهی کلیدها', 'error');
+    }
+  };
+
+  const handlePurgeInvalidKeys = async () => {
+    setIsPurgingInvalid(true);
+    try {
+      const res = await fetch('/api/server/unified-keys/purge-invalid', { method: 'POST' });
+      const data = await res.json();
+      if (data.success) {
+        onShowToast(data.message, data.purgedCount > 0 ? 'success' : 'info');
+        await fetchUnifiedKeys();
+        await fetchServerKeys();
+      } else {
+        onShowToast(data.error || 'خطا در پاکسازی کلیدها', 'error');
+      }
+    } catch {
+      onShowToast('خطا در پاکسازی خودکار کلیدهای نامعتبر', 'error');
+    } finally {
+      setIsPurgingInvalid(false);
+    }
+  };
+
+  const handleTestUnifiedKey = async (id: string) => {
+    try {
+      onShowToast('در حال سنجش پینگ و اعتبار کلید از روی سرور...', 'info');
+      const res = await fetch(`/api/server/unified-keys/test/${id}`, { method: 'POST' });
+      const data = await res.json();
+      if (data.success) {
+        onShowToast(data.message, 'success');
+      } else {
+        onShowToast(data.message || 'تست کلید ناموفق بود.', 'error');
+      }
+      await fetchUnifiedKeys();
+    } catch {
+      onShowToast('خطا در تست کلید', 'error');
+    }
+  };
+
+  const handleBatchSetModelUnifiedKeys = async (model: string) => {
+    if (!model) return;
+    try {
+      const res = await fetch('/api/server/unified-keys/batch-set-model', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ids: selectedUnifiedIds, model }),
+      });
+      const data = await res.json();
+      if (data.success) {
+        onShowToast(data.message || `مدل با موفقیت تغییر کرد.`, 'success');
+        await fetchUnifiedKeys();
+      }
+    } catch {
+      onShowToast('خطا در تغییر مدل', 'error');
+    }
   };
 
   const handleAddCustomServer = async (e: React.FormEvent) => {
@@ -2028,14 +2234,15 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
           <button
             type="button"
             onClick={() => {
+              void fetchUnifiedKeys();
               fetchServerKeys();
               setIsKeysModalOpen(true);
             }}
             className="flex items-center gap-1.5 px-3 py-1.5 rounded-xl text-xs font-semibold bg-indigo-500/20 text-indigo-300 hover:bg-indigo-500/30 border border-indigo-500/30 transition-colors shadow-xs cursor-pointer"
-            title="مدیریت، چرخش خودکار و تست کلیدهای API از روی سرور"
+            title="مدیریت استخر یکپارچه کلیدهای هوش مصنوعی، اولویت‌بندی و چرخش خودکار"
           >
             <Key className="w-3.5 h-3.5 text-amber-400" />
-            <span>استخر کلیدها ({serverKeysCount} فعال)</span>
+            <span>استخر کلیدها ({unifiedKeysList.length > 0 ? unifiedKeysList.length : serverKeysCount} فعال)</span>
           </button>
 
           <button
@@ -2131,7 +2338,11 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
                 <div className="flex items-center gap-2 self-end sm:self-center shrink-0">
                   <button
                     type="button"
-                    onClick={() => setIsKeysModalOpen(true)}
+                    onClick={() => {
+                      void fetchUnifiedKeys();
+                      fetchServerKeys();
+                      setIsKeysModalOpen(true);
+                    }}
                     className="px-3.5 py-1.5 rounded-xl bg-rose-600 hover:bg-rose-500 text-white text-xs font-bold transition-all shadow-sm active:scale-95 flex items-center gap-1.5 cursor-pointer"
                   >
                     <Key className="w-3.5 h-3.5" />
@@ -4379,25 +4590,25 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
         </div>
       )}
 
-      {/* Modal: Server Keys Management Dashboard & Token Analytics */}
+      {/* Modal: Unified AI Keys Pool Management & Priority Control */}
       {isKeysModalOpen && (
-        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-xs flex items-center justify-center p-3 sm:p-4">
-          <div className="bg-slate-900 border border-slate-800 rounded-3xl p-5 lg:p-7 w-full max-w-4xl shadow-2xl flex flex-col gap-5 animate-scale-up max-h-[92vh] overflow-y-auto">
+        <div className="fixed inset-0 z-50 bg-black/85 backdrop-blur-xs flex items-center justify-center p-2 sm:p-4">
+          <div className="bg-slate-900 border border-slate-800 rounded-3xl p-5 lg:p-7 w-full max-w-5xl shadow-2xl flex flex-col gap-5 animate-scale-up max-h-[94vh] overflow-y-auto">
             {/* Modal Header */}
             <div className="flex items-center justify-between pb-4 border-b border-slate-800">
-              <div className="flex items-center gap-2.5">
-                <div className="w-9 h-9 rounded-xl bg-amber-500/20 border border-amber-500/30 flex items-center justify-center text-amber-400">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-2xl bg-gradient-to-br from-indigo-500/20 to-purple-500/20 border border-indigo-500/30 flex items-center justify-center text-indigo-400 shadow-inner">
                   <Key className="w-5 h-5" />
                 </div>
                 <div>
-                  <h3 className="text-sm sm:text-base font-bold text-white flex items-center gap-2">
-                    <span>مدیریت استخر کلیدهای هوش مصنوعی و آمار مصرف توکن</span>
-                    <span className="text-[11px] font-mono px-2 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/40">
-                      Gemini 3.1 Flash Lite
+                  <h3 className="text-base sm:text-lg font-bold text-white flex items-center gap-2.5">
+                    <span>مدیریت استخر یکپارچه کلیدهای هوش مصنوعی</span>
+                    <span className="text-[11px] font-mono px-2.5 py-0.5 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
+                      گردش یکپارچه بدون توقف
                     </span>
                   </h3>
                   <p className="text-xs text-slate-400 mt-0.5">
-                    نمایش وضعیت زنده، تفکیک سهمیه روزانه (RPD) از وقفه دقیقه (RPM)، میزان توکن مصرفی و خروج هوشمند کلیدهای منقضی از چرخه
+                    چرخش خودکار بین کلیدهای Gemini، واسط‌های DeepSeek، OpenAI و Claude بدون تفکیک استخر اصلی و فرعی — با اتمام هر کلید، کار به کلید بعدی منتقل می‌شود.
                   </p>
                 </div>
               </div>
@@ -4410,1313 +4621,639 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
               </button>
             </div>
 
-            {/* Modal Tabs */}
-            <div className="flex items-center gap-2 border-b border-slate-800 pb-3 flex-wrap">
-              <button
-                type="button"
-                onClick={() => setKeysModalTab('gemini')}
-                className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold transition-all cursor-pointer ${
-                  keysModalTab === 'gemini'
-                    ? 'bg-indigo-600 text-white shadow-md shadow-indigo-600/30 ring-1 ring-indigo-400'
-                    : 'bg-slate-800/80 text-slate-400 hover:text-white'
-                }`}
-              >
-                <Key className="w-4 h-4 text-amber-400" />
-                <span>استخر اصلی Gemini ({keysDetails.length} کلید)</span>
-              </button>
-
-              <button
-                type="button"
-                onClick={() => {
-                  setKeysModalTab('fallback');
-                  void fetchFallbackConfig();
-                }}
-                className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold transition-all cursor-pointer ${
-                  keysModalTab === 'fallback'
-                    ? 'bg-indigo-600 text-white shadow-md shadow-indigo-600/30 ring-1 ring-indigo-400'
-                    : 'bg-slate-800/80 text-slate-400 hover:text-white'
-                }`}
-              >
-                <Sparkles className="w-4 h-4 text-emerald-400" />
-                <span>هوش‌های مصنوعی کمکی (OpenAI, Claude, Custom)</span>
-                {((fallbackConfig.openaiKeys?.length || 0) + (fallbackConfig.claudeKeys?.length || 0) > 0 || fallbackConfig.customConfig?.apiKey) && (
-                  <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
-                )}
-              </button>
-            </div>
-
-            {keysModalTab === 'gemini' && (
-              <div className="flex flex-col gap-5">
-            {/* KPI Summary Cards */}
+            {/* Top KPI Cards */}
             {(() => {
-              const totalKeys = keysDetails.length;
-              const dailyKeys = keysDetails.filter((k) => k.isDailyExhausted).length;
-              const minuteKeys = keysDetails.filter((k) => k.isMinuteExhausted && !k.isDailyExhausted).length;
-              const disabledKeys = keysDetails.filter((k) => k.isDisabled).length;
-              const activeKeys = keysDetails.filter((k) => !k.isExhausted && !k.isDisabled).length;
-              const totalTokensSum = keysDetails.reduce((acc, k) => acc + (k.totalTokens || 0), 0);
-              const totalReqsSum = keysDetails.reduce((acc, k) => acc + (k.requestsCount || 0), 0);
+              const totalCount = unifiedKeysList.length;
+              const activeCount = unifiedKeysList.filter((k) => !k.isExhausted && !k.isDisabled && !k.isDailyExhausted).length;
+              const minuteCount = unifiedKeysList.filter((k) => k.isMinuteExhausted && !k.isDailyExhausted).length;
+              const dailyCount = unifiedKeysList.filter((k) => k.isDailyExhausted || k.isDisabled).length;
+              const totalTokensSum = unifiedKeysList.reduce((acc, k) => acc + (k.totalTokens || 0), 0);
 
               return (
-                <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
+                <div className="grid grid-cols-2 sm:grid-cols-5 gap-2.5">
                   <div className="bg-slate-950/80 border border-slate-800 rounded-2xl p-3 flex flex-col gap-1">
-                    <span className="text-[11px] text-slate-400 font-semibold flex items-center gap-1.5">
-                      <Key className="w-3.5 h-3.5 text-indigo-400" />
-                      <span>کلیدهای ثبت‌شده</span>
+                    <span className="text-[11px] text-slate-400 font-medium flex items-center gap-1.5">
+                      <Layers className="w-3.5 h-3.5 text-indigo-400" />
+                      <span>کل کلیدهای فعال استخر</span>
                     </span>
-                    <span className="text-xl font-bold font-mono text-white">{totalKeys}</span>
+                    <span className="text-xl font-bold font-mono text-white">{totalCount}</span>
                   </div>
 
                   <div className="bg-slate-950/80 border border-emerald-500/30 rounded-2xl p-3 flex flex-col gap-1">
-                    <span className="text-[11px] text-emerald-400 font-semibold flex items-center gap-1.5">
+                    <span className="text-[11px] text-emerald-400 font-medium flex items-center gap-1.5">
                       <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
-                      <span>آماده و در چرخه</span>
+                      <span>آماده ترجمه زنده</span>
                     </span>
-                    <span className="text-xl font-bold font-mono text-emerald-400">{activeKeys}</span>
+                    <span className="text-xl font-bold font-mono text-emerald-400">{activeCount}</span>
                   </div>
 
                   <div className="bg-slate-950/80 border border-amber-500/30 rounded-2xl p-3 flex flex-col gap-1">
-                    <span className="text-[11px] text-amber-400 font-semibold flex items-center gap-1.5">
+                    <span className="text-[11px] text-amber-400 font-medium flex items-center gap-1.5">
                       <Clock className="w-3.5 h-3.5 text-amber-400" />
-                      <span>استراحت موقت RPM</span>
+                      <span>وقفه دقیقه (RPM)</span>
                     </span>
-                    <span className="text-xl font-bold font-mono text-amber-400">{minuteKeys}</span>
+                    <span className="text-xl font-bold font-mono text-amber-400">{minuteCount}</span>
                   </div>
 
                   <div className="bg-slate-950/80 border border-rose-500/30 rounded-2xl p-3 flex flex-col gap-1">
-                    <span className="text-[11px] text-rose-400 font-semibold flex items-center gap-1.5">
+                    <span className="text-[11px] text-rose-400 font-medium flex items-center gap-1.5">
                       <AlertCircle className="w-3.5 h-3.5 text-rose-400" />
-                      <span>اتمام سهمیه روزانه</span>
+                      <span>اتمام سهمیه یا خطای 401</span>
                     </span>
-                    <span className="text-xl font-bold font-mono text-rose-400">{dailyKeys}</span>
-                    <span className="text-[9px] text-rose-400/80">خارج از چرخه</span>
+                    <span className="text-xl font-bold font-mono text-rose-400">{dailyCount}</span>
                   </div>
 
-                  <div className="bg-slate-950/80 border border-slate-800 rounded-2xl p-3 flex flex-col gap-1 col-span-2 sm:col-span-1">
-                    <span className="text-[11px] text-slate-400 font-semibold flex items-center gap-1.5">
-                      <Sparkles className="w-3.5 h-3.5 text-amber-400" />
-                      <span>توکن‌های مصرفی</span>
+                  <div className="bg-slate-950/80 border border-purple-500/30 rounded-2xl p-3 flex flex-col gap-1 col-span-2 sm:col-span-1">
+                    <span className="text-[11px] text-purple-400 font-medium flex items-center gap-1.5">
+                      <Zap className="w-3.5 h-3.5 text-purple-400" />
+                      <span>کل توکن مصرفی</span>
                     </span>
-                    <span className="text-base font-bold font-mono text-amber-300">
-                      {totalTokensSum.toLocaleString()}
-                    </span>
-                    <span className="text-[9px] text-slate-500 font-mono">
-                      {totalReqsSum} درخواست
+                    <span className="text-lg font-bold font-mono text-purple-300">
+                      {totalTokensSum > 1000000 ? (totalTokensSum / 1000000).toFixed(2) + 'M' : (totalTokensSum / 1000).toFixed(1) + 'k'}
                     </span>
                   </div>
                 </div>
               );
             })()}
 
-            {/* Quick Actions & Optimization Guidance */}
-            <div className="bg-gradient-to-r from-indigo-950/60 via-slate-950/90 to-indigo-950/60 border border-indigo-500/30 rounded-2xl p-4 flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 shadow-inner">
-              <div className="flex flex-col gap-1 text-xs text-slate-300 leading-relaxed">
-                <div className="flex items-center gap-2 font-bold text-amber-300">
-                  <Sparkles className="w-4 h-4 text-amber-400 shrink-0" />
-                  <span>محافظت هوشمند استخر و جداسازی سهمیه روزانه:</span>
-                </div>
-                <p className="text-[11px] text-slate-300">
-                  • کلیدهایی که سهمیه روزانه گوگل (Requests Per Day) را تمام کنند، <span className="text-rose-400 font-bold">بلافاصله از چرخه چرخش خارج می‌شوند</span> تا مانع پیشرفت و توقف ترجمه نشوند.
-                </p>
-                <p className="text-[11px] text-slate-300">
-                  • تمام ترجمه‌ها با مدل پرسرعت رسمی <span className="text-emerald-300 font-bold font-mono">Gemini 3.1 Flash Lite</span> انجام می‌شوند و هیچ مدل منسوخی استفاده نمی‌شود.
-                </p>
-              </div>
+            {/* Quick Action Toolbar */}
+            <div className="flex items-center justify-between flex-wrap gap-2.5 bg-slate-950/60 border border-slate-800/80 rounded-2xl p-3">
+              <div className="flex items-center gap-2 flex-wrap">
+                <button
+                  type="button"
+                  onClick={handlePurgeInvalidKeys}
+                  disabled={isPurgingInvalid}
+                  className="px-3.5 py-1.5 rounded-xl text-xs font-bold text-rose-300 bg-rose-500/15 hover:bg-rose-500/25 border border-rose-500/30 transition-colors flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+                  title="کلیدهایی که خطای 401 یا نامعتبر داده‌اند را بلافاصله از پایگاه‌داده حذف می‌کند"
+                >
+                  {isPurgingInvalid ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Trash2 className="w-3.5 h-3.5 text-rose-400" />}
+                  <span>پاکسازی خودکار کلیدهای نامعتبر (401)</span>
+                </button>
 
-              <div className="flex items-center gap-2 shrink-0 self-end sm:self-center flex-wrap">
                 <button
                   type="button"
                   onClick={handleClearCache}
                   disabled={isClearingCache}
-                  className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold text-slate-200 bg-slate-800 hover:bg-slate-700 border border-slate-700 shadow-sm transition-all cursor-pointer"
-                  title="پاکسازی کامل کش، قفل‌های مسدود و بازگردانی صف بدون حذف زیرنویس‌ها"
+                  className="px-3 py-1.5 rounded-xl text-xs font-semibold text-amber-300 bg-amber-500/15 hover:bg-amber-500/25 border border-amber-500/30 transition-colors flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+                  title="تمام وقفه‌های موقت و قفل‌های مسدود کلیدها را بازنشانی می‌کند"
                 >
-                  <RotateCcw className={`w-3.5 h-3.5 ${isClearingCache ? 'animate-spin' : ''}`} />
-                  <span>پاکسازی کش (حفظ زیرنویس)</span>
+                  {isClearingCache ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RotateCcw className="w-3.5 h-3.5 text-amber-400" />}
+                  <span>رفع وقفه و بازگردانی تمام کلیدها</span>
                 </button>
 
                 <button
                   type="button"
                   onClick={handleResetAllCooldowns}
-                  className="flex items-center gap-1.5 px-3.5 py-2 rounded-xl text-xs font-bold text-white bg-emerald-600 hover:bg-emerald-500 shadow-md shadow-emerald-600/30 transition-all cursor-pointer"
-                  title="خارج کردن تمام کلیدها از حالت وقفه و فعال‌سازی فوری"
+                  className="px-3 py-1.5 rounded-xl text-xs font-semibold text-slate-300 bg-slate-800 hover:bg-slate-700 border border-slate-700 transition-colors flex items-center gap-1.5 cursor-pointer"
                 >
-                  <RotateCcw className="w-3.5 h-3.5" />
-                  <span>رفع وقفه کلیدها</span>
+                  <RefreshCw className="w-3.5 h-3.5" />
+                  <span>ریست وقفه‌های RPM</span>
+                </button>
+              </div>
+
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    void fetchUnifiedKeys();
+                    void fetchServerKeys();
+                  }}
+                  className="px-3 py-1.5 rounded-xl text-xs font-semibold text-indigo-300 bg-indigo-500/15 hover:bg-indigo-500/25 border border-indigo-500/30 transition-colors flex items-center gap-1.5 cursor-pointer"
+                >
+                  <RefreshCw className="w-3.5 h-3.5" />
+                  <span>بروزرسانی لیست</span>
                 </button>
               </div>
             </div>
 
-            {/* Registered Keys List with Token Usage Table */}
-            <div className="flex flex-col gap-3">
-              <div className="flex items-center justify-between flex-wrap gap-2">
-                <div className="flex items-center gap-2 flex-wrap">
-                  <span className="text-xs font-bold text-slate-200 flex items-center gap-2">
-                    <Activity className="w-4 h-4 text-indigo-400" />
-                    <span>فهرست کلیدهای API سرور ({keysDetails.length + customKeysList.length} کلید)</span>
-                  </span>
+            {/* SECTION 1: ADD KEYS (Two distinct tabs as requested) */}
+            <div className="bg-slate-950/80 border border-slate-800 rounded-2xl p-4 flex flex-col gap-3.5">
+              <div className="flex items-center justify-between border-b border-slate-800 pb-2.5 flex-wrap gap-2">
+                <div className="flex items-center gap-2">
+                  <Plus className="w-4 h-4 text-emerald-400" />
+                  <span className="text-xs font-bold text-white">افزودن کلیدها به چرخه استخر</span>
+                </div>
+                <div className="flex items-center gap-1.5 bg-slate-900 p-1 rounded-xl border border-slate-800">
+                  <button
+                    type="button"
+                    onClick={() => setAddKeySectionTab('batch_main')}
+                    className={'px-3 py-1 rounded-lg text-xs font-semibold transition-all cursor-pointer ' + (addKeySectionTab === 'batch_main' ? 'bg-indigo-600 text-white shadow-xs' : 'text-slate-400 hover:text-white')}
+                  >
+                    ورود دسته‌جمعی کلیدها (Gemini / OpenAI / Claude)
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setAddKeySectionTab('broker_custom')}
+                    className={'px-3 py-1 rounded-lg text-xs font-semibold transition-all cursor-pointer ' + (addKeySectionTab === 'broker_custom' ? 'bg-amber-600 text-white shadow-xs' : 'text-slate-400 hover:text-white')}
+                  >
+                    شرکت‌های واسط و سرورهای اختصاصی (DeepSeek / OneAPI)
+                  </button>
+                </div>
+              </div>
 
-                  {/* Filter Pills */}
-                  <div className="flex items-center gap-1 bg-slate-950 p-1 rounded-xl border border-slate-800 text-xs">
+              {/* Tab A: Batch Main Keys Entry */}
+              {addKeySectionTab === 'batch_main' && (
+                <form onSubmit={handleAddBatchKeys} className="flex flex-col gap-3">
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                    <div>
+                      <label className="text-[11px] font-medium text-slate-400 mb-1 block">نوع هوش مصنوعی</label>
+                      <select
+                        value={batchProviderType}
+                        onChange={(e) => {
+                          const val = e.target.value;
+                          setBatchProviderType(val);
+                          if (val === 'gemini') setBatchProviderModel('gemini-2.5-flash');
+                          else if (val === 'openai') setBatchProviderModel('gpt-4o-mini');
+                          else if (val === 'claude') setBatchProviderModel('claude-3-5-haiku-20241022');
+                        }}
+                        className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-hidden focus:border-indigo-500"
+                      >
+                        <option value="gemini">Google Gemini (پیش‌فرض سریع)</option>
+                        <option value="openai">OpenAI GPT</option>
+                        <option value="claude">Anthropic Claude</option>
+                      </select>
+                    </div>
+
+                    <div>
+                      <label className="text-[11px] font-medium text-slate-400 mb-1 block">مدل هوش مصنوعی</label>
+                      {batchProviderType === 'gemini' ? (
+                        <select
+                          value={batchProviderModel}
+                          onChange={(e) => setBatchProviderModel(e.target.value)}
+                          className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-hidden focus:border-indigo-500 font-mono"
+                        >
+                          <option value="gemini-2.5-flash">gemini-2.5-flash (توصیه‌شده)</option>
+                          <option value="gemini-2.5-flash-lite">gemini-2.5-flash-lite (سریع و سبک)</option>
+                          <option value="gemini-2.5-pro">gemini-2.5-pro (دقت بالا)</option>
+                          <option value="gemini-3.1-flash-lite">gemini-3.1-flash-lite</option>
+                        </select>
+                      ) : batchProviderType === 'openai' ? (
+                        <select
+                          value={batchProviderModel}
+                          onChange={(e) => setBatchProviderModel(e.target.value)}
+                          className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-hidden focus:border-indigo-500 font-mono"
+                        >
+                          <option value="gpt-4o-mini">gpt-4o-mini (اقتصادی و بسیار سریع)</option>
+                          <option value="gpt-4o">gpt-4o</option>
+                          <option value="gpt-3.5-turbo">gpt-3.5-turbo</option>
+                        </select>
+                      ) : (
+                        <select
+                          value={batchProviderModel}
+                          onChange={(e) => setBatchProviderModel(e.target.value)}
+                          className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-hidden focus:border-indigo-500 font-mono"
+                        >
+                          <option value="claude-3-5-haiku-20241022">claude-3-5-haiku-20241022 (سریع)</option>
+                          <option value="claude-3-5-sonnet-20241022">claude-3-5-sonnet-20241022</option>
+                        </select>
+                      )}
+                    </div>
+
+                    <div className="flex flex-col justify-end">
+                      <p className="text-[11px] text-slate-400">
+                        کلیدها را خط به خط در جعبه پایین قرار دهید. تمام کلیدها با اولویت‌بندی به استخر افزوده خواهند شد.
+                      </p>
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="text-[11px] font-medium text-slate-400 mb-1 block">
+                      کلیدهای API (هر خط یک کلید — پشتیبانی از ده‌ها کلید همزمان):
+                    </label>
+                    <textarea
+                      value={batchProviderKeysText}
+                      onChange={(e) => setBatchProviderKeysText(e.target.value)}
+                      placeholder={
+                        batchProviderType === 'gemini'
+                          ? "AIzaSy...\nAIzaSy...\nAIzaSy..."
+                          : batchProviderType === 'openai'
+                          ? "sk-proj-...\nsk-proj-..."
+                          : "sk-ant-...\nsk-ant-..."
+                      }
+                      rows={3}
+                      dir="ltr"
+                      className="w-full bg-slate-900 border border-slate-700 rounded-xl p-3 text-xs font-mono text-emerald-400 focus:outline-hidden focus:border-indigo-500 placeholder:text-slate-600 resize-y"
+                    />
+                  </div>
+
+                  <div className="flex items-center justify-end">
                     <button
-                      type="button"
-                      onClick={() => setKeyPoolFilter('all')}
-                      className={`px-2.5 py-1 rounded-lg font-bold transition-all cursor-pointer ${
-                        keyPoolFilter === 'all'
-                          ? 'bg-indigo-600 text-white shadow-sm'
-                          : 'text-slate-400 hover:text-white'
-                      }`}
+                      type="submit"
+                      disabled={isAddingBatchKeys || !batchProviderKeysText.trim()}
+                      className="px-5 py-2 rounded-xl text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-500 shadow-md shadow-indigo-600/30 transition-colors flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
                     >
-                      همه ({keysDetails.length + customKeysList.length})
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setKeyPoolFilter('gemini')}
-                      className={`px-2.5 py-1 rounded-lg font-bold transition-all cursor-pointer ${
-                        keyPoolFilter === 'gemini'
-                          ? 'bg-indigo-600 text-white shadow-sm'
-                          : 'text-slate-400 hover:text-white'
-                      }`}
-                    >
-                      Gemini ({keysDetails.length})
-                    </button>
-                    <button
-                      type="button"
-                      onClick={() => setKeyPoolFilter('custom')}
-                      className={`px-2.5 py-1 rounded-lg font-bold transition-all cursor-pointer ${
-                        keyPoolFilter === 'custom'
-                          ? 'bg-cyan-600 text-white shadow-sm'
-                          : 'text-slate-400 hover:text-white'
-                      }`}
-                    >
-                      واسط‌های DeepSeek ({customKeysList.length})
+                      {isAddingBatchKeys ? <Loader2 className="w-4 h-4 animate-spin" /> : <Plus className="w-4 h-4" />}
+                      <span>افزودن دسته‌جمعی به استخر یکپارچه</span>
                     </button>
                   </div>
-                </div>
+                </form>
+              )}
 
-                <div className="flex items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setKeysModalTab('fallback');
-                      setIsAddingNewServer(true);
-                    }}
-                    className="text-[11px] text-cyan-300 hover:text-cyan-200 flex items-center gap-1 bg-cyan-500/10 hover:bg-cyan-500/20 px-2.5 py-1 rounded-lg border border-cyan-500/30 font-bold cursor-pointer transition-colors"
-                    title="افزودن سرور کاستوم یا کلیدهای واسط DeepSeek"
-                  >
-                    <Plus className="w-3.5 h-3.5" />
-                    <span>+ افزودن سرور DeepSeek</span>
-                  </button>
+              {/* Tab B: Broker Custom Servers Entry */}
+              {addKeySectionTab === 'broker_custom' && (
+                <form onSubmit={handleAddBrokerKeys} className="flex flex-col gap-3">
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                    <div>
+                      <label className="text-[11px] font-medium text-slate-400 mb-1 block">نام شرکت یا سرور واسط</label>
+                      <input
+                        type="text"
+                        value={brokerName}
+                        onChange={(e) => setBrokerName(e.target.value)}
+                        placeholder="مثال: DeepSeek واسط یا OneAPI"
+                        className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white focus:outline-hidden focus:border-amber-500"
+                      />
+                    </div>
 
-                  <button
-                    type="button"
-                    onClick={handleResetKeyStats}
-                    className="text-[11px] text-slate-400 hover:text-amber-300 transition-colors flex items-center gap-1 bg-slate-800/60 px-2 py-1 rounded-lg border border-slate-700/60 cursor-pointer"
-                    title="صفر کردن کنتور توکن‌ها برای محاسبه جدید"
-                  >
-                    <Trash2 className="w-3 h-3 text-slate-400" />
-                    <span>ریست آمار توکن‌ها</span>
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={fetchServerKeys}
-                    className="text-[11px] text-indigo-400 hover:text-indigo-300 flex items-center gap-1 bg-indigo-500/10 px-2.5 py-1 rounded-lg border border-indigo-500/20 cursor-pointer"
-                  >
-                    <RefreshCw className="w-3 h-3" />
-                    <span>بروزرسانی وضعیت</span>
-                  </button>
-                </div>
-              </div>
-
-              {/* Batch Controls Toolbar: Select All, Batch Delete, Batch Model Change */}
-              <div className="bg-slate-950/80 border border-slate-800 rounded-xl p-3 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs">
-                <div className="flex items-center gap-3 flex-wrap">
-                  <label className="flex items-center gap-1.5 cursor-pointer font-bold text-slate-300">
-                    <input
-                      type="checkbox"
-                      checked={keysDetails.length > 0 && selectedKeyIndices.length === keysDetails.length}
-                      onChange={(e) => {
-                        if (e.target.checked) setSelectedKeyIndices(keysDetails.map((k) => k.index));
-                        else setSelectedKeyIndices([]);
-                      }}
-                      className="accent-indigo-500 w-4 h-4 rounded cursor-pointer"
-                    />
-                    <span>انتخاب همه ({selectedKeyIndices.length} از {keysDetails.length})</span>
-                  </label>
-
-                  {selectedKeyIndices.length > 0 && (
-                    <button
-                      type="button"
-                      onClick={() => handleBatchDeleteKeys(false)}
-                      disabled={isBatchDeletingKeys}
-                      className="flex items-center gap-1.5 px-3 py-1 rounded-lg text-xs font-bold bg-rose-600/30 text-rose-300 hover:bg-rose-600/50 border border-rose-500/40 cursor-pointer transition-colors"
-                    >
-                      <Trash2 className="w-3.5 h-3.5" />
-                      <span>حذف انتخاب‌شده‌ها ({selectedKeyIndices.length})</span>
-                    </button>
-                  )}
-
-                  {keysDetails.length > 0 && (
-                    <button
-                      type="button"
-                      onClick={() => handleBatchDeleteKeys(true)}
-                      disabled={isBatchDeletingKeys}
-                      className="flex items-center gap-1 px-2.5 py-1 rounded-lg text-[11px] text-slate-400 hover:text-rose-300 bg-slate-900 border border-slate-800 hover:border-rose-500/30 cursor-pointer transition-colors"
-                      title="پاکسازی کامل استخر و حذف تمام کلیدها"
-                    >
-                      <span>پاکسازی کل استخر</span>
-                    </button>
-                  )}
-                </div>
-
-                {/* Batch Model Changer */}
-                <div className="flex items-center gap-2 flex-wrap">
-                  <span className="text-slate-400 font-semibold shrink-0">مدل استخر:</span>
-                  <select
-                    value={batchKeyModel}
-                    onChange={(e) => setBatchKeyModel(e.target.value)}
-                    className="bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1 text-xs text-amber-300 font-mono focus:outline-none focus:border-indigo-500"
-                  >
-                    <option value="gemini-3.1-flash-lite">Gemini 3.1 Flash Lite (فوق‌سریع - پیش‌فرض)</option>
-                    <option value="gemini-flash-latest">Gemini Flash Latest (نسخه پایدار)</option>
-                    <option value="gemini-3.8-flash">Gemini 3.8 Flash (دقت بالا)</option>
-                    <option value="gemini-2.5-flash">Gemini 2.5 Flash</option>
-                    <option value="custom">مدل سفارشی...</option>
-                  </select>
-                  {batchKeyModel === 'custom' && (
-                    <input
-                      type="text"
-                      placeholder="مثال: gemini-..."
-                      value={customKeyModelInput}
-                      onChange={(e) => setCustomKeyModelInput(e.target.value)}
-                      className="bg-slate-900 border border-slate-700 rounded-lg px-2 py-1 text-xs text-white w-32 font-mono"
-                    />
-                  )}
-                  <button
-                    type="button"
-                    onClick={() => handleChangePoolModel(batchKeyModel)}
-                    disabled={isChangingPoolModel}
-                    className="px-3 py-1 rounded-lg text-xs font-bold bg-indigo-600 hover:bg-indigo-500 text-white transition-colors cursor-pointer disabled:opacity-50"
-                    title="تغییر دسته جمعی مدل فعال برای تمام کلیدهای استخر"
-                  >
-                    {isChangingPoolModel ? 'در حال اعمال...' : 'اعمال مدل'}
-                  </button>
-                </div>
-              </div>
-
-              {keysDetails.length === 0 && customKeysList.length === 0 ? (
-                <div className="text-xs text-amber-300/90 bg-amber-500/10 border border-amber-500/20 rounded-2xl p-4 text-center">
-                  هنوز هیچ کلیدی (Gemini یا سرور واسط DeepSeek) در سرور ذخیره نشده است. با استفاده از کادر زیر یا زبانه «سرورهای واسط DeepSeek / کاستوم» کلیدهای خود را اضافه کنید.
-                </div>
-              ) : (
-                <div className="max-h-96 overflow-y-auto space-y-2.5 pr-1 border border-slate-800/80 rounded-2xl p-2 bg-slate-950/50">
-                  {/* Gemini Keys */}
-                  {(keyPoolFilter === 'all' || keyPoolFilter === 'gemini') && keysDetails.map((k) => (
-                    <div
-                      key={k.index}
-                      className={`flex flex-col p-3 rounded-xl border text-xs transition-all ${
-                        k.isExhausted
-                          ? 'bg-rose-500/5 border-rose-500/30'
-                          : 'bg-slate-900/90 border-slate-800 hover:border-slate-700'
-                      }`}
-                    >
-                      {editingKeyIndex === k.index ? (
-                        <div className="flex items-center gap-2">
-                          <input
-                            type="text"
-                            value={editingKeyVal}
-                            onChange={(e) => setEditingKeyVal(e.target.value)}
-                            className="w-full bg-slate-950 border border-indigo-500 rounded-lg px-2.5 py-1 text-xs text-white font-mono direction-ltr"
-                            placeholder="AIzaSy..."
-                            autoFocus
-                          />
-                          <button
-                            type="button"
-                            onClick={() => handleUpdateSingleKey(k.index)}
-                            className="px-3 py-1 bg-emerald-600 hover:bg-emerald-500 text-white rounded-lg font-bold text-xs shrink-0 cursor-pointer"
-                          >
-                            ذخیره
-                          </button>
+                    <div className="sm:col-span-2">
+                      <div className="flex items-center justify-between mb-1">
+                        <label className="text-[11px] font-medium text-slate-400 block">آدرس سرور واسط (Base URL)</label>
+                        <div className="flex items-center gap-1.5">
                           <button
                             type="button"
                             onClick={() => {
-                              setEditingKeyIndex(null);
-                              setEditingKeyVal('');
+                              setBrokerBaseUrl('https://api.deepseek.com');
+                              setBrokerModel('deepseek-chat');
                             }}
-                            className="px-2.5 py-1 bg-slate-800 hover:bg-slate-700 text-slate-300 rounded-lg text-xs shrink-0 cursor-pointer"
+                            className="text-[10px] text-amber-400 hover:underline cursor-pointer"
                           >
-                            انصراف
+                            پیش‌فرض DeepSeek
                           </button>
-                        </div>
-                      ) : (
-                        <div className="flex flex-col md:flex-row md:items-center justify-between gap-3">
-                          {/* Key Identity & Status */}
-                          <div className="flex items-center gap-2.5 min-w-0">
-                            <input
-                              type="checkbox"
-                              checked={selectedKeyIndices.includes(k.index)}
-                              onChange={(e) => {
-                                if (e.target.checked) setSelectedKeyIndices((prev) => [...prev, k.index]);
-                                else setSelectedKeyIndices((prev) => prev.filter((i) => i !== k.index));
-                              }}
-                              className="accent-indigo-500 w-4 h-4 rounded cursor-pointer shrink-0"
-                            />
-                            <span className="w-6 h-6 rounded-lg bg-indigo-950/70 border border-indigo-500/40 flex items-center justify-center text-[10px] font-mono text-indigo-300 font-bold shrink-0">
-                              #{k.index + 1}
-                            </span>
-                            <div className="flex flex-col min-w-0">
-                              <div className="flex items-center gap-2">
-                                <span className="font-mono text-white tracking-wider truncate font-semibold">
-                                  {k.maskedKey}
-                                </span>
-                                <button
-                                  type="button"
-                                  onClick={() => {
-                                    navigator.clipboard.writeText(k.rawKey);
-                                    onShowToast('کلید در کلیپ‌بورد کپی شد.', 'info');
-                                  }}
-                                  className="text-slate-500 hover:text-slate-300 p-0.5"
-                                  title="کپی کلید کامل"
-                                >
-                                  <Copy className="w-3 h-3" />
-                                </button>
-                                <span className="text-[10px] font-bold px-1.5 py-0.5 rounded bg-indigo-500/20 text-indigo-300 border border-indigo-500/30">
-                                  Gemini
-                                </span>
-                              </div>
-
-                              <div className="flex items-center gap-3 text-[10px] text-slate-400 mt-0.5">
-                                {k.isDisabled ? (
-                                  <span className="flex items-center gap-1 text-rose-400 font-bold bg-rose-500/15 px-2 py-0.5 rounded-md border border-rose-500/30">
-                                    <AlertCircle className="w-3 h-3 text-rose-400" />
-                                    <span>غیرفعال (۴۰۱ - حذف‌شده یا فاقد دسترسی در گوگل)</span>
-                                  </span>
-                                ) : k.isDailyExhausted ? (
-                                  <span className="flex items-center gap-1 text-rose-300 font-bold bg-rose-500/20 px-2 py-0.5 rounded-md border border-rose-500/40">
-                                    <AlertCircle className="w-3 h-3 text-rose-400" />
-                                    <span>🔴 اتمام سهمیه روزانه (Daily Quota) — خارج از چرخه تا فردا</span>
-                                  </span>
-                                ) : k.isExhausted ? (
-                                  <span className="flex items-center gap-1 text-amber-400 font-semibold bg-amber-500/10 px-2 py-0.5 rounded-md border border-amber-500/20">
-                                    <Clock className="w-3 h-3" />
-                                    <span>🟡 استراحت موقت دقیقه ({k.cooldownRemainingSec}s مانده)</span>
-                                  </span>
-                                ) : (
-                                  <span className="flex items-center gap-1 text-emerald-400 font-semibold">
-                                    <CheckCircle2 className="w-3 h-3" />
-                                    <span>🟢 آماده و فعال در چرخه (Gemini 3.1 Flash Lite)</span>
-                                  </span>
-                                )}
-
-                                {k.lastUsedAt && (
-                                  <span className="text-slate-500 font-mono">
-                                    آخرین استفاده: {new Date(k.lastUsedAt).toLocaleTimeString('fa-IR')}
-                                  </span>
-                                )}
-                              </div>
-                            </div>
-                          </div>
-
-                          {/* Token Consumption Stats Badges */}
-                          <div className="flex items-center gap-2 flex-wrap">
-                            <div className="flex items-center gap-1.5 bg-slate-950 px-2 py-1 rounded-lg border border-slate-800 text-[11px]">
-                              <span className="text-slate-400">درخواست‌ها:</span>
-                              <span className="font-mono text-white font-bold">{k.requestsCount || 0}</span>
-                            </div>
-
-                            <div className="flex items-center gap-1.5 bg-slate-950 px-2 py-1 rounded-lg border border-slate-800 text-[11px]">
-                              <span className="text-slate-400">توکن ورودی:</span>
-                              <span className="font-mono text-cyan-300">{(k.promptTokens || 0).toLocaleString()}</span>
-                            </div>
-
-                            <div className="flex items-center gap-1.5 bg-slate-950 px-2 py-1 rounded-lg border border-slate-800 text-[11px]">
-                              <span className="text-slate-400">توکن ترجمه:</span>
-                              <span className="font-mono text-emerald-300">{(k.candidatesTokens || 0).toLocaleString()}</span>
-                            </div>
-
-                            <div className="flex items-center gap-1.5 bg-indigo-950/60 px-2 py-1 rounded-lg border border-indigo-500/30 text-[11px]">
-                              <span className="text-indigo-300 font-bold">کل توکن:</span>
-                              <span className="font-mono text-amber-300 font-bold">{(k.totalTokens || 0).toLocaleString()}</span>
-                            </div>
-                          </div>
-
-                          {/* Action Buttons */}
-                          <div className="flex items-center gap-1.5 shrink-0 self-end md:self-center">
-                            {k.isExhausted && (
-                              <button
-                                type="button"
-                                onClick={() => handleResetSingleCooldown(k.index)}
-                                className="px-2 py-1 rounded-lg bg-rose-500/20 hover:bg-rose-500/30 text-rose-300 border border-rose-500/30 text-[10px] font-bold transition-colors cursor-pointer"
-                                title="رفع وقفه این کلید و آماده‌سازی فوری"
-                              >
-                                رفع وقفه
-                              </button>
-                            )}
-
-                            <button
-                              type="button"
-                              onClick={() => handleTestServerKey(k.rawKey)}
-                              className="px-2.5 py-1 rounded-lg bg-amber-500/10 hover:bg-amber-500/20 text-amber-300 border border-amber-500/30 text-[10px] font-bold transition-colors cursor-pointer"
-                              title="تست آنلاین این کلید از روی سرور"
-                            >
-                              تست زنده
-                            </button>
-
-                            <button
-                              type="button"
-                              onClick={() => {
-                                setEditingKeyIndex(k.index);
-                                setEditingKeyVal(k.rawKey);
-                              }}
-                              className="p-1.5 rounded-lg text-slate-400 hover:text-indigo-400 bg-slate-800 hover:bg-slate-700 transition-colors cursor-pointer"
-                              title="ویرایش کلید"
-                            >
-                              <Edit3 className="w-3.5 h-3.5" />
-                            </button>
-
-                            <button
-                              type="button"
-                              onClick={() => handleDeleteSingleKey(k.index)}
-                              className="p-1.5 rounded-lg text-slate-400 hover:text-rose-400 bg-slate-800 hover:bg-slate-700 transition-colors cursor-pointer"
-                              title="حذف کلید"
-                            >
-                              <Trash2 className="w-3.5 h-3.5" />
-                            </button>
-                          </div>
-                        </div>
-                      )}
-                    </div>
-                  ))}
-
-                  {/* DeepSeek & Custom Proxy Keys */}
-                  {(keyPoolFilter === 'all' || keyPoolFilter === 'custom') && customKeysList.map((ck, idx) => (
-                    <div
-                      key={`custom-key-${ck.serverId}-${idx}`}
-                      className={`flex flex-col p-3 rounded-xl border text-xs transition-all ${
-                        !ck.isEnabled
-                          ? 'bg-slate-950/40 border-slate-800/50 opacity-60'
-                          : 'bg-emerald-950/15 border-emerald-500/20 hover:border-emerald-500/40'
-                      }`}
-                    >
-                      <div className="flex flex-col md:flex-row md:items-center justify-between gap-3">
-                        {/* Identity & Status */}
-                        <div className="flex items-center gap-2.5 min-w-0">
-                          <span className="w-6 h-6 rounded-lg bg-emerald-950/70 border border-emerald-500/40 flex items-center justify-center text-[10px] font-mono text-emerald-300 font-bold shrink-0">
-                            DS
-                          </span>
-                          <div className="flex flex-col min-w-0">
-                            <div className="flex items-center gap-2">
-                              <span className="font-mono text-white tracking-wider truncate font-semibold">
-                                {ck.maskedKey}
-                              </span>
-                              <button
-                                type="button"
-                                onClick={() => {
-                                  navigator.clipboard.writeText(ck.rawKey);
-                                  onShowToast('کلید واسط در کلیپ‌بورد کپی شد.', 'info');
-                                }}
-                                className="text-slate-500 hover:text-slate-300 p-0.5"
-                                title="کپی کلید کامل واسط"
-                              >
-                                <Copy className="w-3 h-3" />
-                              </button>
-                              <span className="text-[10px] font-bold px-2 py-0.5 rounded-md bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
-                                {ck.serverName}
-                              </span>
-                            </div>
-
-                            <div className="flex items-center gap-3 text-[10px] text-slate-400 mt-0.5">
-                              {ck.isEnabled ? (
-                                <span className="flex items-center gap-1 text-emerald-400 font-semibold">
-                                  <CheckCircle2 className="w-3 h-3" />
-                                  <span>🟢 فعال در استخر واسط‌ها (مدل: {ck.model})</span>
-                                </span>
-                              ) : (
-                                <span className="flex items-center gap-1 text-slate-500">
-                                  <AlertCircle className="w-3 h-3" />
-                                  <span>غیرفعال (خاموش در تنظیمات سرورها)</span>
-                                </span>
-                              )}
-                              <span className="text-slate-500 font-mono text-[9px] truncate max-w-[200px]" dir="ltr">
-                                {ck.baseUrl}
-                              </span>
-                            </div>
-                          </div>
-                        </div>
-
-                        {/* Token Consumption Stats Badges */}
-                        <div className="flex items-center gap-2 flex-wrap">
-                          <div className="flex items-center gap-1.5 bg-slate-950 px-2 py-1 rounded-lg border border-slate-800 text-[11px]">
-                            <span className="text-slate-400">درخواست‌ها:</span>
-                            <span className="font-mono text-white font-bold">{ck.requestsCount || 0}</span>
-                          </div>
-                          <div className="flex items-center gap-1.5 bg-emerald-950/40 px-2 py-1 rounded-lg border border-emerald-500/30 text-[11px]">
-                            <span className="text-emerald-300 font-bold">توکن مصرفی:</span>
-                            <span className="font-mono text-emerald-200 font-bold">{(ck.tokensCount || 0).toLocaleString()}</span>
-                          </div>
-                        </div>
-
-                        {/* Action Buttons */}
-                        <div className="flex items-center gap-1.5 shrink-0 self-end md:self-center">
+                          <span className="text-slate-600">|</span>
                           <button
                             type="button"
-                            onClick={() => handleTestCustomServer(ck.serverId)}
-                            disabled={testingCustomServerId === ck.serverId}
-                            className="px-2.5 py-1 rounded-lg bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300 border border-emerald-500/40 text-[10px] font-bold transition-colors cursor-pointer disabled:opacity-50"
-                            title="تست پینگ و ارتباط واقعی با این سرور واسط"
+                            onClick={() => {
+                              setBrokerBaseUrl('https://api.openai-proxy.org/v1');
+                              setBrokerModel('deepseek-chat');
+                            }}
+                            className="text-[10px] text-indigo-400 hover:underline cursor-pointer"
                           >
-                            {testingCustomServerId === ck.serverId ? 'در حال تست...' : 'تست زنده واسط'}
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => setKeysModalTab('fallback')}
-                            className="p-1.5 rounded-lg text-slate-400 hover:text-emerald-300 bg-slate-800 hover:bg-slate-700 transition-colors cursor-pointer text-[10px] flex items-center gap-1"
-                            title="ویرایش یا افزودن کلیدهای این سرور در زبانه واسط‌ها"
-                          >
-                            <Settings className="w-3.5 h-3.5" />
-                            <span>تنظیمات</span>
+                            پروکسی OneAPI
                           </button>
                         </div>
                       </div>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-
-            {/* Server-Side Key Ping Test Box */}
-            <div className="bg-slate-950/80 border border-slate-800 rounded-2xl p-4 flex flex-col gap-3">
-              <div className="flex items-center justify-between flex-wrap gap-2">
-                <span className="text-xs font-bold text-slate-200 flex items-center gap-1.5">
-                  <Sparkles className="w-4 h-4 text-amber-400" />
-                  <span>تست آنلاین ارتباط و سرعت مدل Gemini 3.5 Flash Lite از روی سرور</span>
-                </span>
-                <button
-                  type="button"
-                  disabled={isTestingKey}
-                  onClick={() => handleTestServerKey()}
-                  className="px-3.5 py-1.5 rounded-xl text-xs font-bold bg-amber-500/20 text-amber-300 hover:bg-amber-500/30 border border-amber-500/30 flex items-center gap-1.5 transition-colors disabled:opacity-50 cursor-pointer"
-                >
-                  {isTestingKey ? (
-                    <>
-                      <Loader2 className="w-3.5 h-3.5 animate-spin text-amber-400" />
-                      <span>در حال تست اتصال از سرور...</span>
-                    </>
-                  ) : (
-                    <>
-                      <Play className="w-3.5 h-3.5 text-amber-400 fill-amber-400" />
-                      <span>تست آنلاین کلید اصلی</span>
-                    </>
-                  )}
-                </button>
-              </div>
-
-              {testResult && (
-                <div
-                  className={`p-3 rounded-xl text-xs leading-relaxed border ${
-                    testResult.success
-                      ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300'
-                      : 'bg-rose-500/10 border-rose-500/30 text-rose-300'
-                  }`}
-                >
-                  <div className="flex items-center justify-between font-bold mb-1">
-                    <span>{testResult.success ? '✓ پاسخ موفق سرور جمینای' : '✗ خطا در پاسخگویی سرور'}</span>
-                    {testResult.latencyMs && (
-                      <span className="font-mono text-[11px] bg-slate-900 px-2 py-0.5 rounded border border-slate-800 text-slate-300">
-                        زمان پاسخ: {testResult.latencyMs} میلی‌ثانیه | مدل: {testResult.modelUsed || 'Gemini 3.5 Flash Lite'}
-                      </span>
-                    )}
-                  </div>
-                  <p className="text-[11px] opacity-90">{testResult.message}</p>
-                </div>
-              )}
-            </div>
-
-            {/* Batch Add Keys Form */}
-            <form onSubmit={handleSaveServerKeys} className="flex flex-col gap-3 pt-3 border-t border-slate-800">
-              <div className="flex items-center justify-between flex-wrap gap-2">
-                <label className="text-xs text-slate-300 font-semibold block">
-                  افزودن کلیدهای API جدید به استخر (هر کلید در یک سطر):
-                </label>
-                <div className="flex items-center gap-3 text-xs text-slate-400">
-                  <label className="flex items-center gap-1.5 cursor-pointer">
-                    <input
-                      type="radio"
-                      name="keyMode"
-                      value="append"
-                      checked={keySaveMode === 'append'}
-                      onChange={() => setKeySaveMode('append')}
-                      className="accent-indigo-500"
-                    />
-                    <span>افزودن به استخر موجود</span>
-                  </label>
-                  <label className="flex items-center gap-1.5 cursor-pointer">
-                    <input
-                      type="radio"
-                      name="keyMode"
-                      value="replace"
-                      checked={keySaveMode === 'replace'}
-                      onChange={() => setKeySaveMode('replace')}
-                      className="accent-indigo-500"
-                    />
-                    <span>جایگزینی کل استخر کلیدها</span>
-                  </label>
-                </div>
-              </div>
-
-              {/* Model selection when adding keys */}
-              <div className="flex items-center justify-between flex-wrap gap-2 bg-slate-950/60 p-2.5 rounded-xl border border-slate-800 text-xs">
-                <span className="text-slate-300 font-medium">مدل ترجمه برای این کلیدها:</span>
-                <div className="flex items-center gap-2">
-                  <select
-                    value={batchKeyModel}
-                    onChange={(e) => setBatchKeyModel(e.target.value)}
-                    className="bg-slate-900 border border-slate-700 rounded-lg px-2.5 py-1 text-xs text-amber-300 font-mono focus:outline-none focus:border-indigo-500"
-                  >
-                    <option value="gemini-3.1-flash-lite">Gemini 3.1 Flash Lite (فوق‌سریع - پیش‌فرض)</option>
-                    <option value="gemini-flash-latest">Gemini Flash Latest</option>
-                    <option value="gemini-3.8-flash">Gemini 3.8 Flash</option>
-                    <option value="gemini-2.5-flash">Gemini 2.5 Flash</option>
-                    <option value="custom">مدل سفارشی...</option>
-                  </select>
-                  {batchKeyModel === 'custom' && (
-                    <input
-                      type="text"
-                      placeholder="نام مدل..."
-                      value={customKeyModelInput}
-                      onChange={(e) => setCustomKeyModelInput(e.target.value)}
-                      className="bg-slate-900 border border-slate-700 rounded-lg px-2 py-1 text-xs text-white w-32 font-mono"
-                    />
-                  )}
-                </div>
-              </div>
-
-              <textarea
-                rows={3}
-                value={serverKeysText}
-                onChange={(e) => setServerKeysText(e.target.value)}
-                placeholder={"AIzaSy...\nAIzaSy..."}
-                className="w-full bg-slate-950 border border-slate-700 rounded-xl p-3 text-xs text-amber-200 font-mono focus:outline-none focus:border-indigo-500 direction-ltr placeholder-slate-600"
-              />
-
-              <div className="flex items-center justify-end gap-2.5 mt-1">
-                <button
-                  type="button"
-                  onClick={() => setIsKeysModalOpen(false)}
-                  className="px-4 py-2 rounded-xl text-xs font-semibold text-slate-400 hover:text-white bg-slate-800 hover:bg-slate-700 transition-colors cursor-pointer"
-                >
-                  بستن پنجره
-                </button>
-                <button
-                  type="submit"
-                  className="px-5 py-2 rounded-xl text-xs font-bold text-white bg-indigo-600 hover:bg-indigo-500 shadow-md shadow-indigo-600/30 transition-colors flex items-center gap-1.5 cursor-pointer"
-                >
-                  <Plus className="w-4 h-4" />
-                  <span>ثبت و ذخیره کلیدها</span>
-                </button>
-              </div>
-            </form>
-            </div>
-            )}
-
-            {/* Tab 2: Fallback AI Providers (OpenAI, Claude, Custom) */}
-            {keysModalTab === 'fallback' && (
-              <div className="flex flex-col gap-5">
-                {/* Fallback Intro & Strategy */}
-                <div className="bg-gradient-to-r from-violet-950/50 via-slate-950 to-indigo-950/50 border border-violet-500/30 rounded-2xl p-4 flex flex-col gap-3">
-                  <div className="flex items-center gap-2 text-violet-300 font-bold text-xs sm:text-sm">
-                    <Sparkles className="w-4 h-4 text-emerald-400" />
-                    <span>سیاست هوشمند اولویت‌بندی، سرعت (پینگ) و سوییچ هوش‌های مصنوعی:</span>
-                  </div>
-                  <p className="text-xs text-slate-300 leading-relaxed">
-                    می‌توانید اولویت پیش‌فرض را از جمنای بردارید و روی <strong className="text-cyan-300">«کمترین پینگ (پاسخ سریع‌تر)»</strong> بگذارید تا سرور خودکار سریع‌ترین مدل را انتخاب کند، یا با کلیک روی فلش‌های بالا/پایین در کادر زیر، <strong className="text-amber-300">ترتیب اولویت دلخواه خودتان</strong> را جابه‌جا کنید.
-                  </p>
-
-                  <div className="flex flex-col gap-2 pt-2 border-t border-slate-800">
-                    <label className="text-xs font-bold text-slate-200">نحوه انتخاب و اولویت موتور ترجمه:</label>
-                    <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
-                      {[
-                        { id: 'lowest_ping', label: '⚡ کمترین پینگ و سریع‌ترین پاسخ (هوشمند خودکار)', desc: 'سرور پینگ مدل‌ها را سنجیده و همیشه آن هوش مصنوعی که کمترین تاخیر را دارد اولویت اول قرار می‌دهد.' },
-                        { id: 'custom_priority', label: '🎛️ چیدمان و اولویت دلخواه شما (دستی)', desc: 'دقیقاً طبق ترتیبی که در جدول زیر با دکمه‌های بالا/پایین چیده‌اید اجرا می‌شود.' },
-                        { id: 'custom_first', label: '🔵 اولویت اول با سرورهای واسط DeepSeek', desc: 'ابتدا تمام درخواست‌ها با واسط‌های DeepSeek ترجمه می‌شوند و در صورت نیاز به بقیه سوییچ می‌شود.' },
-                        { id: 'gemini_with_fallback', label: '🟢 اولویت با گوگل Gemini', desc: 'اولویت اول با کلیدهای جمنای، در صورت اتمام سهمیه سوییچ خودکار به واسط‌ها و پشتیبان‌ها.' },
-                        { id: 'custom', label: 'فقط سرورهای سفارشی / واسط DeepSeek', desc: 'فقط و فقط با سرورهای واسط بدون سوییچ به گوگل.' },
-                        { id: 'gemini_only', label: 'فقط گوگل Gemini', desc: 'فقط با کلیدهای گوگل جمنای بدون هیچ سوییچی.' },
-                      ].map((strat) => (
-                        <label
-                          key={strat.id}
-                          className={`flex items-start gap-2 p-2.5 rounded-xl border cursor-pointer transition-all ${
-                            fallbackConfig.providerStrategy === strat.id
-                              ? 'bg-cyan-600/20 border-cyan-500 text-white shadow-sm'
-                              : 'bg-slate-950/60 border-slate-800 text-slate-400 hover:text-slate-200'
-                          }`}
-                        >
-                          <input
-                            type="radio"
-                            name="providerStrategy"
-                            value={strat.id}
-                            checked={fallbackConfig.providerStrategy === strat.id}
-                            onChange={() => setFallbackConfig({ ...fallbackConfig, providerStrategy: strat.id as any })}
-                            className="mt-0.5 accent-cyan-500 shrink-0"
-                          />
-                          <div className="flex flex-col text-right">
-                            <span className="text-xs font-bold text-slate-100">{strat.label}</span>
-                            <span className="text-[10px] text-slate-400 mt-0.5">{strat.desc}</span>
-                          </div>
-                        </label>
-                      ))}
+                      <input
+                        type="text"
+                        value={brokerBaseUrl}
+                        onChange={(e) => setBrokerBaseUrl(e.target.value)}
+                        placeholder="https://api.deepseek.com یا https://your-broker-url.com/v1"
+                        dir="ltr"
+                        className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-xs font-mono text-white focus:outline-hidden focus:border-amber-500"
+                      />
                     </div>
                   </div>
-                </div>
 
-                {/* Priority Ordering & Live Ping Monitor */}
-                <div className="bg-slate-950/80 border border-slate-800 rounded-2xl p-4 flex flex-col gap-3.5">
-                  <div className="flex items-center justify-between flex-wrap gap-2 pb-2.5 border-b border-slate-800">
-                    <div className="flex items-center gap-2">
-                      <Sliders className="w-4 h-4 text-cyan-400" />
-                      <span className="text-xs sm:text-sm font-bold text-white">
-                        ترتیب اولویت اجرای هوش‌های مصنوعی و سنجش زنده تاخیر (پینگ)
-                      </span>
+                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                    <div>
+                      <label className="text-[11px] font-medium text-slate-400 mb-1 block">نام مدل</label>
+                      <input
+                        type="text"
+                        value={brokerModel}
+                        onChange={(e) => setBrokerModel(e.target.value)}
+                        placeholder="deepseek-chat"
+                        dir="ltr"
+                        className="w-full bg-slate-900 border border-slate-700 rounded-xl px-3 py-2 text-xs font-mono text-white focus:outline-hidden focus:border-amber-500"
+                      />
                     </div>
 
+                    <div className="sm:col-span-2 flex items-center">
+                      <div className="bg-amber-500/10 border border-amber-500/25 rounded-xl p-2.5 text-[11px] text-amber-300 w-full flex items-center gap-2">
+                        <Clock className="w-4 h-4 shrink-0 text-amber-400" />
+                        <span>
+                          سرورهای واسط تاخیر دارند؛ سیستم تا دریافت پاسخ کامل منتظر می‌ماند و درخواست موازی ارسال نمی‌کند تا سقف درخواست ایجاد نشود.
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="text-[11px] font-medium text-slate-400 mb-1 block">
+                      کلیدهای این سرور واسط (هر خط یک کلید — می‌توانید ده‌ها کلید از شرکت واسط را همزمان اضافه کنید):
+                    </label>
+                    <textarea
+                      value={brokerKeysText}
+                      onChange={(e) => setBrokerKeysText(e.target.value)}
+                      placeholder="sk-...\nsk-...\nsk-..."
+                      rows={3}
+                      dir="ltr"
+                      className="w-full bg-slate-900 border border-slate-700 rounded-xl p-3 text-xs font-mono text-amber-400 focus:outline-hidden focus:border-amber-500 placeholder:text-slate-600 resize-y"
+                    />
+                  </div>
+
+                  <div className="flex items-center justify-end">
                     <button
-                      type="button"
-                      onClick={handleMeasureAllPings}
-                      disabled={isMeasuringPings}
-                      className="px-3 py-1.5 rounded-xl bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-bold shadow-md shadow-cyan-600/20 flex items-center gap-1.5 transition-all cursor-pointer disabled:opacity-50"
-                      title="ارسال درخواست سنجش همزمان به تمامی سرویس‌ها برای محاسبه دقیق پینگ و سرعت"
+                      type="submit"
+                      disabled={isAddingBrokerServer || !brokerKeysText.trim() || !brokerBaseUrl.trim()}
+                      className="px-5 py-2 rounded-xl text-xs font-bold text-white bg-amber-600 hover:bg-amber-500 shadow-md shadow-amber-600/30 transition-colors flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
                     >
-                      {isMeasuringPings ? (
-                        <>
-                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                          <span>در حال سنجش پینگ مدل‌ها...</span>
-                        </>
-                      ) : (
-                        <>
-                          <Zap className="w-3.5 h-3.5 text-amber-300 fill-amber-300" />
-                          <span>سنجش زنده پینگ و سرعت همه هوش‌ها</span>
-                        </>
-                      )}
+                      {isAddingBrokerServer ? <Loader2 className="w-4 h-4 animate-spin" /> : <Server className="w-4 h-4" />}
+                      <span>افزودن سرور و کلیدهای واسط به استخر</span>
                     </button>
                   </div>
+                </form>
+              )}
+            </div>
 
-                  <p className="text-[11px] text-slate-400 leading-relaxed">
-                    با زدن دکمه‌های <strong className="text-white">▲ (بالاتر)</strong> یا <strong className="text-white">▼ (پایین‌تر)</strong> اولویت هر مدل را جابه‌جا کنید. در حالت <strong className="text-cyan-300">«کمترین پینگ (خودکار)»</strong>، سرور اتوماتیک مدلی که کمترین میلی‌ثانیه را داشته باشد در صدر قرار می‌دهد؛ و در حالت <strong className="text-cyan-300">«چیدمان دستی»</strong>، دقیقاً طبق همین فهرست زیر ترجمه انجام می‌شود:
-                  </p>
+            {/* SECTION 2: UNIFIED KEY LIST & PRIORITY CONTROL */}
+            <div className="flex flex-col gap-3">
+              <div className="flex items-center justify-between flex-wrap gap-2.5">
+                {/* Filter Pills */}
+                <div className="flex items-center gap-1.5 flex-wrap">
+                  <span className="text-xs font-bold text-white ml-1">فهرست کلیدها و اولویت چرخش:</span>
+                  <button
+                    type="button"
+                    onClick={() => setUnifiedKeyFilter('all')}
+                    className={'px-3 py-1 rounded-xl text-xs font-bold transition-all cursor-pointer ' + (unifiedKeyFilter === 'all' ? 'bg-indigo-600 text-white shadow-xs' : 'bg-slate-800 text-slate-400 hover:text-white')}
+                  >
+                    همه ({unifiedKeysList.length})
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setUnifiedKeyFilter('gemini')}
+                    className={'px-3 py-1 rounded-xl text-xs font-bold transition-all cursor-pointer ' + (unifiedKeyFilter === 'gemini' ? 'bg-blue-600 text-white shadow-xs' : 'bg-slate-800 text-slate-400 hover:text-white')}
+                  >
+                    Gemini ({unifiedKeysList.filter((k) => k.provider === 'gemini').length})
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setUnifiedKeyFilter('custom')}
+                    className={'px-3 py-1 rounded-xl text-xs font-bold transition-all cursor-pointer ' + (unifiedKeyFilter === 'custom' ? 'bg-amber-600 text-white shadow-xs' : 'bg-slate-800 text-slate-400 hover:text-white')}
+                  >
+                    واسط DeepSeek ({unifiedKeysList.filter((k) => k.provider === 'custom').length})
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setUnifiedKeyFilter('openai')}
+                    className={'px-3 py-1 rounded-xl text-xs font-bold transition-all cursor-pointer ' + (unifiedKeyFilter === 'openai' ? 'bg-emerald-600 text-white shadow-xs' : 'bg-slate-800 text-slate-400 hover:text-white')}
+                  >
+                    OpenAI ({unifiedKeysList.filter((k) => k.provider === 'openai').length})
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setUnifiedKeyFilter('claude')}
+                    className={'px-3 py-1 rounded-xl text-xs font-bold transition-all cursor-pointer ' + (unifiedKeyFilter === 'claude' ? 'bg-purple-600 text-white shadow-xs' : 'bg-slate-800 text-slate-400 hover:text-white')}
+                  >
+                    Claude ({unifiedKeysList.filter((k) => k.provider === 'claude').length})
+                  </button>
+                </div>
 
-                  <div className="flex flex-col gap-2">
-                    {providerPriorityOrder.map((provId, index) => {
-                      const isFirst = index === 0;
-                      const isLast = index === providerPriorityOrder.length - 1;
-                      const pingInfo = providerPings[provId];
+                {/* Batch Actions on Selection */}
+                {selectedUnifiedIds.length > 0 && (
+                  <div className="flex items-center gap-2 bg-indigo-950/60 border border-indigo-500/30 rounded-xl px-3 py-1.5 animate-scale-up">
+                    <span className="text-xs text-indigo-300 font-bold">
+                      {selectedUnifiedIds.length} کلید انتخاب شده:
+                    </span>
+                    <button
+                      type="button"
+                      onClick={handleBatchDeleteUnifiedKeys}
+                      className="px-2.5 py-1 rounded-lg text-xs font-bold bg-rose-600/30 text-rose-300 hover:bg-rose-600/50 border border-rose-500/40 transition-colors flex items-center gap-1 cursor-pointer"
+                    >
+                      <Trash2 className="w-3.5 h-3.5" />
+                      <span>حذف گروهی</span>
+                    </button>
+                    <div className="flex items-center gap-1">
+                      <select
+                        value={batchUnifiedModel}
+                        onChange={(e) => setBatchUnifiedModel(e.target.value)}
+                        className="bg-slate-900 border border-slate-700 rounded-lg px-2 py-0.5 text-xs text-white font-mono"
+                      >
+                        <option value="gemini-2.5-flash">gemini-2.5-flash</option>
+                        <option value="gemini-2.5-flash-lite">gemini-2.5-flash-lite</option>
+                        <option value="deepseek-chat">deepseek-chat</option>
+                        <option value="gpt-4o-mini">gpt-4o-mini</option>
+                      </select>
+                      <button
+                        type="button"
+                        onClick={() => handleBatchSetModelUnifiedKeys(batchUnifiedModel)}
+                        className="px-2 py-1 rounded-lg text-xs font-bold bg-indigo-600 text-white hover:bg-indigo-500 transition-colors cursor-pointer"
+                      >
+                        تغییر مدل
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
 
-                      let name = provId;
-                      let badge = provId;
-                      let badgeClass = 'bg-slate-800 text-slate-300 border-slate-700';
-                      let countLabel = '';
-                      let model = '';
+              {/* Selection helper row */}
+              {unifiedKeysList.length > 0 && (
+                <div className="flex items-center justify-between text-xs text-slate-400 px-1">
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        const currentFiltered = unifiedKeysList.filter((k) => {
+                          if (unifiedKeyFilter === 'all') return true;
+                          return k.provider === unifiedKeyFilter;
+                        });
+                        if (selectedUnifiedIds.length === currentFiltered.length) {
+                          setSelectedUnifiedIds([]);
+                        } else {
+                          setSelectedUnifiedIds(currentFiltered.map((k) => k.id));
+                        }
+                      }}
+                      className="text-xs text-indigo-400 hover:underline cursor-pointer"
+                    >
+                      {selectedUnifiedIds.length === unifiedKeysList.length ? 'لغو انتخاب همه' : 'انتخاب همه کلیدها'}
+                    </button>
+                    <span>•</span>
+                    <span>با دکمه‌های ▲ و ▼ اولویت چرخش کلیدها را به دلخواه جابه‌جا کنید.</span>
+                  </div>
+                </div>
+              )}
 
-                      if (provId === 'custom') {
-                        name = 'سرورهای واسط DeepSeek و پروکسی‌ها';
-                        model = fallbackConfig.customConfig?.model || 'deepseek-chat';
-                        badge = 'DeepSeek / Proxy';
-                        badgeClass = 'bg-cyan-500/20 text-cyan-300 border-cyan-500/30';
-                        countLabel = `${customServersList.length} سرور (${customKeysList.length} کلید فعال)`;
-                      } else if (provId === 'gemini') {
-                        name = 'گوگل Gemini (مدل‌های سری ۳)';
-                        model = 'Gemini 3.1 Flash Lite';
-                        badge = 'Google Gemini';
-                        badgeClass = 'bg-indigo-500/20 text-indigo-300 border-indigo-500/30';
-                        countLabel = `${keysDetails.length} کلید در استخر سرور`;
-                      } else if (provId === 'openai') {
-                        name = 'سرویس OpenAI (GPT)';
-                        model = fallbackConfig.openaiModel || 'gpt-4o-mini';
-                        badge = 'OpenAI GPT';
-                        badgeClass = 'bg-emerald-500/20 text-emerald-300 border-emerald-500/30';
-                        countLabel = `${openaiKeysText.split('\n').filter((k) => k.trim()).length} کلید ثبت‌شده`;
-                      } else if (provId === 'claude') {
-                        name = 'سرویس Anthropic Claude';
-                        model = fallbackConfig.claudeModel || 'claude-3-5-haiku';
-                        badge = 'Anthropic Claude';
-                        badgeClass = 'bg-amber-500/20 text-amber-300 border-amber-500/30';
-                        countLabel = `${claudeKeysText.split('\n').filter((k) => k.trim()).length} کلید ثبت‌شده`;
-                      }
+              {/* Key Cards Container */}
+              <div className="space-y-2 max-h-[460px] overflow-y-auto pr-1">
+                {(() => {
+                  const filtered = unifiedKeysList.filter((k) => {
+                    if (unifiedKeyFilter === 'all') return true;
+                    return k.provider === unifiedKeyFilter;
+                  });
 
-                      return (
-                        <div
-                          key={provId}
-                          className={`p-3 rounded-xl border flex flex-col sm:flex-row sm:items-center justify-between gap-3 transition-all ${
-                            isFirst
-                              ? 'bg-gradient-to-r from-cyan-950/40 to-slate-900 border-cyan-500/50 shadow-sm'
-                              : 'bg-slate-900/80 border-slate-800 hover:border-slate-700'
-                          }`}
-                        >
-                          {/* Rank Badge + Identity */}
-                          <div className="flex items-center gap-3 min-w-0">
-                            <span
-                              className={`w-7 h-7 rounded-lg flex items-center justify-center text-xs font-bold shrink-0 ${
-                                isFirst
-                                  ? 'bg-cyan-500 text-slate-950 shadow-md shadow-cyan-500/30'
-                                  : index === 1
-                                  ? 'bg-indigo-600/60 text-white border border-indigo-400/40'
-                                  : 'bg-slate-800 text-slate-300 border border-slate-700'
-                              }`}
+                  if (filtered.length === 0) {
+                    return (
+                      <div className="text-center py-12 border border-dashed border-slate-800 rounded-2xl bg-slate-950/40">
+                        <Key className="w-10 h-10 text-slate-600 mx-auto mb-2" />
+                        <p className="text-sm font-semibold text-slate-400">هیچ کلیدی در این دسته ثبت نشده است.</p>
+                        <p className="text-xs text-slate-500 mt-1">از فرم بالا برای افزودن کلیدهای جدید استفاده کنید.</p>
+                      </div>
+                    );
+                  }
+
+                  return filtered.map((k, idx) => {
+                    const isSelected = selectedUnifiedIds.includes(k.id);
+                    const isMinuteWait = k.isMinuteExhausted && !k.isDailyExhausted;
+                    const isDailyWait = k.isDailyExhausted;
+                    const isKeyDead = k.isDisabled;
+
+                    let providerBadgeColor = 'bg-blue-500/20 text-blue-300 border-blue-500/40';
+                    let providerLabel = 'Gemini';
+                    if (k.provider === 'custom') {
+                      providerBadgeColor = 'bg-amber-500/20 text-amber-300 border-amber-500/40';
+                      providerLabel = k.name || 'واسط DeepSeek';
+                    } else if (k.provider === 'openai') {
+                      providerBadgeColor = 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40';
+                      providerLabel = 'OpenAI';
+                    } else if (k.provider === 'claude') {
+                      providerBadgeColor = 'bg-purple-500/20 text-purple-300 border-purple-500/40';
+                      providerLabel = 'Claude';
+                    }
+
+                    return (
+                      <div
+                        key={k.id}
+                        className={'p-3 rounded-2xl border transition-all flex items-center justify-between gap-3 flex-wrap sm:flex-nowrap ' + (
+                          isSelected
+                            ? 'bg-indigo-950/30 border-indigo-500/50 shadow-md'
+                            : 'bg-slate-950/70 border-slate-800/90 hover:border-slate-700'
+                        )}
+                      >
+                        {/* Right: Selection & Priority controls & Info */}
+                        <div className="flex items-center gap-2.5 min-w-0">
+                          {/* Selection Checkbox */}
+                          <input
+                            type="checkbox"
+                            checked={isSelected}
+                            onChange={(e) => {
+                              if (e.target.checked) {
+                                setSelectedUnifiedIds((prev) => [...prev, k.id]);
+                              } else {
+                                setSelectedUnifiedIds((prev) => prev.filter((id) => id !== k.id));
+                              }
+                            }}
+                            className="rounded-md border-slate-700 bg-slate-900 text-indigo-600 focus:ring-0 cursor-pointer w-4 h-4"
+                          />
+
+                          {/* Priority Reordering Buttons */}
+                          <div className="flex flex-col gap-0.5">
+                            <button
+                              type="button"
+                              onClick={() => handleMoveKeyPriority(k.id, 'up')}
+                              disabled={idx === 0}
+                              className="w-5 h-4.5 rounded-sm bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white disabled:opacity-20 flex items-center justify-center text-[10px] cursor-pointer transition-colors"
+                              title="افزایش اولویت (حرکت به بالا)"
                             >
-                              #{index + 1}
-                            </span>
-
-                            <div className="flex flex-col min-w-0">
-                              <div className="flex items-center gap-2 flex-wrap">
-                                <span className="font-bold text-white text-xs sm:text-sm">
-                                  {name}
-                                </span>
-                                <span className={`text-[10px] font-bold px-2 py-0.5 rounded-md border ${badgeClass}`}>
-                                  {badge}
-                                </span>
-                                {isFirst && (
-                                  <span className="text-[10px] font-bold px-2 py-0.5 rounded-md bg-amber-500/20 text-amber-300 border border-amber-500/30">
-                                    ★ اولویت اول
-                                  </span>
-                                )}
-                              </div>
-                              <div className="flex items-center gap-2 text-[11px] text-slate-400 mt-0.5">
-                                <span className="font-mono text-slate-300">{model}</span>
-                                <span>•</span>
-                                <span>{countLabel}</span>
-                              </div>
-                            </div>
+                              ▲
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleMoveKeyPriority(k.id, 'down')}
+                              disabled={idx === filtered.length - 1}
+                              className="w-5 h-4.5 rounded-sm bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white disabled:opacity-20 flex items-center justify-center text-[10px] cursor-pointer transition-colors"
+                              title="کاهش اولویت (حرکت به پایین)"
+                            >
+                              ▼
+                            </button>
                           </div>
 
-                          {/* Ping Status + Move Buttons */}
-                          <div className="flex items-center gap-2.5 shrink-0 self-end sm:self-center">
-                            {/* Latency Pill */}
-                            <div className="flex items-center gap-1.5 bg-slate-950 px-2.5 py-1 rounded-xl border border-slate-800 text-xs font-mono">
-                              <span className="text-slate-400 text-[10px]">پینگ:</span>
-                              {pingInfo && pingInfo.latencyMs < 999999 ? (
-                                <span
-                                  className={`font-bold flex items-center gap-1 ${
-                                    pingInfo.latencyMs < 600
-                                      ? 'text-emerald-400'
-                                      : pingInfo.latencyMs < 1800
-                                      ? 'text-amber-400'
-                                      : 'text-rose-400'
-                                  }`}
-                                >
-                                  <span className={`w-1.5 h-1.5 rounded-full ${
-                                    pingInfo.latencyMs < 600 ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'
-                                  }`}></span>
-                                  <span>{pingInfo.latencyMs} ms</span>
+                          {/* Priority Rank Badge */}
+                          <div className="w-7 h-7 rounded-lg bg-slate-800/90 border border-slate-700 flex items-center justify-center text-xs font-mono font-bold text-slate-300 shrink-0">
+                            #{idx + 1}
+                          </div>
+
+                          {/* Provider & Key Info */}
+                          <div className="min-w-0 flex flex-col gap-0.5">
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <span className={'text-[11px] font-bold px-2 py-0.5 rounded-lg border ' + providerBadgeColor}>
+                                {providerLabel}
+                              </span>
+                              <span className="text-xs font-mono font-bold text-white tracking-wide" dir="ltr">
+                                {k.maskedKey}
+                              </span>
+                              <span className="text-[10px] font-mono px-2 py-0.5 rounded-md bg-slate-800 text-slate-300 border border-slate-700">
+                                {k.model}
+                              </span>
+                              {k.baseUrl && (
+                                <span className="text-[10px] font-mono px-2 py-0.5 rounded-md bg-amber-500/10 text-amber-300/80 border border-amber-500/20 max-w-[180px] truncate" dir="ltr">
+                                  {k.baseUrl}
                                 </span>
-                              ) : (
-                                <span className="text-slate-500 text-[10px]">سنجش نشده</span>
                               )}
                             </div>
 
-                            {/* Move Up / Down Buttons */}
-                            <div className="flex items-center gap-1 bg-slate-950 p-1 rounded-xl border border-slate-800">
-                              <button
-                                type="button"
-                                onClick={() => handleMovePriority(index, 'up')}
-                                disabled={isFirst}
-                                className="p-1 rounded-lg hover:bg-slate-800 text-slate-300 hover:text-cyan-300 disabled:opacity-30 disabled:hover:text-slate-300 cursor-pointer transition-colors"
-                                title="انتقال به اولویت بالاتر (▲)"
-                              >
-                                <ChevronUp className="w-4 h-4" />
-                              </button>
-                              <button
-                                type="button"
-                                onClick={() => handleMovePriority(index, 'down')}
-                                disabled={isLast}
-                                className="p-1 rounded-lg hover:bg-slate-800 text-slate-300 hover:text-cyan-300 disabled:opacity-30 disabled:hover:text-slate-300 cursor-pointer transition-colors"
-                                title="انتقال به اولویت پایین‌تر (▼)"
-                              >
-                                <ChevronDown className="w-4 h-4" />
-                              </button>
+                            <div className="flex items-center gap-3 text-[11px] text-slate-400 font-mono mt-0.5">
+                              <span>توکن: {(k.totalTokens || 0).toLocaleString('fa-IR')}</span>
+                              <span>•</span>
+                              <span>درخواست: {k.requestsCount || 0}</span>
+                              {k.latencyMs && (
+                                <>
+                                  <span>•</span>
+                                  <span className="text-emerald-400">پینگ: {k.latencyMs}ms</span>
+                                </>
+                              )}
+                              {k.cooldownRemainingSeconds && k.cooldownRemainingSeconds > 0 && (
+                                <>
+                                  <span>•</span>
+                                  <span className="text-amber-400">وقفه: {k.cooldownRemainingSeconds} ثانیه</span>
+                                </>
+                              )}
                             </div>
                           </div>
                         </div>
-                      );
-                    })}
-                  </div>
-                </div>
 
-                {/* Test Result Alert */}
-                {fallbackTestResult && (
-                  <div
-                    className={`p-3.5 rounded-2xl text-xs border flex items-center justify-between gap-3 ${
-                      fallbackTestResult.success
-                        ? 'bg-emerald-500/10 border-emerald-500/30 text-emerald-300'
-                        : 'bg-rose-500/10 border-rose-500/30 text-rose-300'
-                    }`}
-                  >
-                    <div className="flex items-center gap-2">
-                      {fallbackTestResult.success ? <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" /> : <AlertCircle className="w-4 h-4 text-rose-400 shrink-0" />}
-                      <span>{fallbackTestResult.message}</span>
-                    </div>
-                    {fallbackTestResult.latencyMs && (
-                      <span className="font-mono text-[11px] bg-slate-900 px-2 py-0.5 rounded border border-slate-800">
-                        تاخیر: {fallbackTestResult.latencyMs}ms
-                      </span>
-                    )}
-                  </div>
-                )}
+                        {/* Left: Realtime Status & Actions */}
+                        <div className="flex items-center gap-2 shrink-0 self-end sm:self-center">
+                          {/* Live Status Badge */}
+                          {isKeyDead ? (
+                            <span className="text-[11px] px-2.5 py-1 rounded-xl bg-rose-500/20 text-rose-300 border border-rose-500/30 flex items-center gap-1 font-semibold">
+                              <AlertCircle className="w-3 h-3" />
+                              <span>غیرمعتبر (401)</span>
+                            </span>
+                          ) : isDailyWait ? (
+                            <span className="text-[11px] px-2.5 py-1 rounded-xl bg-rose-500/15 text-rose-300 border border-rose-500/25 flex items-center gap-1 font-semibold">
+                              <Clock className="w-3 h-3" />
+                              <span>پایان سهمیه روزانه</span>
+                            </span>
+                          ) : isMinuteWait ? (
+                            <span className="text-[11px] px-2.5 py-1 rounded-xl bg-amber-500/20 text-amber-300 border border-amber-500/30 flex items-center gap-1 font-semibold">
+                              <Clock className="w-3 h-3" />
+                              <span>وقفه دقیقه ({k.cooldownRemainingSeconds || 0}s)</span>
+                            </span>
+                          ) : (
+                            <span className="text-[11px] px-2.5 py-1 rounded-xl bg-emerald-500/20 text-emerald-300 border border-emerald-500/30 flex items-center gap-1 font-semibold">
+                              <CheckCircle2 className="w-3 h-3 text-emerald-400" />
+                              <span>آماده و فعال</span>
+                            </span>
+                          )}
 
-                {/* Provider 1: OpenAI */}
-                <div className="bg-slate-950/70 border border-slate-800 rounded-2xl p-4 flex flex-col gap-3">
-                  <div className="flex items-center justify-between flex-wrap gap-2 pb-2 border-b border-slate-800">
-                    <div className="flex items-center gap-2 font-bold text-slate-100 text-xs">
-                      <span className="w-2.5 h-2.5 rounded-full bg-emerald-400"></span>
-                      <span>سرویس OpenAI (GPT-4o-mini / GPT-4o)</span>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <select
-                        value={fallbackConfig.openaiModel || 'gpt-4o-mini'}
-                        onChange={(e) => setFallbackConfig({ ...fallbackConfig, openaiModel: e.target.value })}
-                        className="bg-slate-900 border border-slate-700 text-slate-200 text-xs rounded-lg px-2.5 py-1 focus:outline-none"
-                      >
-                        <option value="gpt-4o-mini">gpt-4o-mini (سریع، دقیق و کم‌هزینه)</option>
-                        <option value="gpt-4o">gpt-4o (مدل پرچمدار)</option>
-                        <option value="gpt-3.5-turbo">gpt-3.5-turbo</option>
-                      </select>
-                      <button
-                        type="button"
-                        onClick={() => handleTestFallbackKey('openai')}
-                        disabled={isTestingFallback}
-                        className="px-3 py-1 bg-slate-800 hover:bg-slate-700 text-slate-200 text-[11px] font-bold rounded-lg border border-slate-700 flex items-center gap-1 cursor-pointer"
-                      >
-                        {isTestingFallback ? <Loader2 className="w-3 h-3 animate-spin" /> : <Play className="w-3 h-3 text-emerald-400" />}
-                        <span>تست آنلاین OpenAI</span>
-                      </button>
-                    </div>
-                  </div>
-                  <div>
-                    <label className="text-[11px] text-slate-400 block mb-1">
-                      کلیدهای OpenAI API (هر کلید در یک سطر):
-                    </label>
-                    <textarea
-                      rows={2}
-                      value={openaiKeysText}
-                      onChange={(e) => setOpenaiKeysText(e.target.value)}
-                      placeholder="sk-proj-..."
-                      className="w-full bg-slate-900 border border-slate-800 rounded-xl p-2.5 text-xs text-emerald-300 font-mono focus:outline-none focus:border-indigo-500 direction-ltr placeholder-slate-600"
-                    />
-                  </div>
-                </div>
-
-                {/* Provider 2: Anthropic Claude */}
-                <div className="bg-slate-950/70 border border-slate-800 rounded-2xl p-4 flex flex-col gap-3">
-                  <div className="flex items-center justify-between flex-wrap gap-2 pb-2 border-b border-slate-800">
-                    <div className="flex items-center gap-2 font-bold text-slate-100 text-xs">
-                      <span className="w-2.5 h-2.5 rounded-full bg-amber-400"></span>
-                      <span>سرویس Anthropic Claude (Claude 3.5 Haiku / Sonnet)</span>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <select
-                        value={fallbackConfig.claudeModel || 'claude-3-5-haiku-20241022'}
-                        onChange={(e) => setFallbackConfig({ ...fallbackConfig, claudeModel: e.target.value })}
-                        className="bg-slate-900 border border-slate-700 text-slate-200 text-xs rounded-lg px-2.5 py-1 focus:outline-none"
-                      >
-                        <option value="claude-3-5-haiku-20241022">claude-3-5-haiku (پرسرعت و هوشمند)</option>
-                        <option value="claude-3-5-sonnet-20241022">claude-3-5-sonnet (بالاترین کیفیت ادبی)</option>
-                      </select>
-                      <button
-                        type="button"
-                        onClick={() => handleTestFallbackKey('claude')}
-                        disabled={isTestingFallback}
-                        className="px-3 py-1 bg-slate-800 hover:bg-slate-700 text-slate-200 text-[11px] font-bold rounded-lg border border-slate-700 flex items-center gap-1 cursor-pointer"
-                      >
-                        {isTestingFallback ? <Loader2 className="w-3 h-3 animate-spin" /> : <Play className="w-3 h-3 text-amber-400" />}
-                        <span>تست آنلاین Claude</span>
-                      </button>
-                    </div>
-                  </div>
-                  <div>
-                    <label className="text-[11px] text-slate-400 block mb-1">
-                      کلیدهای Anthropic API (هر کلید در یک سطر):
-                    </label>
-                    <textarea
-                      rows={2}
-                      value={claudeKeysText}
-                      onChange={(e) => setClaudeKeysText(e.target.value)}
-                      placeholder="sk-ant-..."
-                      className="w-full bg-slate-900 border border-slate-800 rounded-xl p-2.5 text-xs text-amber-300 font-mono focus:outline-none focus:border-indigo-500 direction-ltr placeholder-slate-600"
-                    />
-                  </div>
-                </div>
-
-                {/* Provider 3: Multiple Custom Servers & DeepSeek Brokers Pool */}
-                <div className="bg-slate-950/70 border border-slate-800 rounded-2xl p-4 flex flex-col gap-4">
-                  <div className="flex items-center justify-between flex-wrap gap-2 pb-3 border-b border-slate-800">
-                    <div className="flex items-center gap-2 font-bold text-slate-100 text-xs sm:text-sm">
-                      <span className="w-2.5 h-2.5 rounded-full bg-cyan-400"></span>
-                      <span>استخر سرورهای کاستوم و کلیدهای واسط DeepSeek ({customServersList.length} سرور / {customKeysList.length} کلید)</span>
-                    </div>
-
-                    <div className="flex items-center gap-2">
-                      <button
-                        type="button"
-                        onClick={() => setIsAddingNewServer(!isAddingNewServer)}
-                        className="px-3 py-1.5 bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-bold rounded-xl shadow-md shadow-cyan-600/20 flex items-center gap-1.5 cursor-pointer transition-colors"
-                      >
-                        <Plus className="w-3.5 h-3.5" />
-                        <span>{isAddingNewServer ? 'بستن فرم' : '+ افزودن سرور کاستوم جدید'}</span>
-                      </button>
-                    </div>
-                  </div>
-
-                  {/* Latency & Proxy Broker Notice */}
-                  <div className="bg-cyan-950/40 border border-cyan-500/30 rounded-xl p-3 text-[11px] text-cyan-200 flex items-start gap-2 leading-relaxed">
-                    <Info className="w-4 h-4 text-cyan-400 shrink-0 mt-0.5" />
-                    <div className="flex flex-col gap-0.5">
-                      <span className="font-bold text-cyan-300">رعایت تاخیر سرورهای واسط و ارسال کاملاً ترتیبی:</span>
-                      <span>
-                        سرورهای واسط و بروکرها معمولاً به دلیل صف‌بندی با تاخیر پاسخ می‌دهند. سیستم تاخیر پاسخ سرور واسط را کاملاً رعایت کرده و تا زمان دریافت پاسخ معتبر، هیچ درخواست موازی مخربی ارسال نمی‌کند و پس از تایید موفقیت هر بسته، بسته بعدی فرستاده می‌شود.
-                      </span>
-                    </div>
-                  </div>
-
-                  {/* Form to Add New Custom Server */}
-                  {(isAddingNewServer || customServersList.length === 0) && (
-                    <form onSubmit={handleAddCustomServer} className="bg-slate-900/90 border border-cyan-500/30 rounded-2xl p-4 flex flex-col gap-3">
-                      <div className="flex items-center justify-between pb-2 border-b border-slate-800">
-                        <span className="text-xs font-bold text-cyan-300 flex items-center gap-1.5">
-                          <Plus className="w-3.5 h-3.5" />
-                          <span>مشخصات سرور سفارشی جدید (DeepSeek / OneAPI / OpenRouter)</span>
-                        </span>
-                        {customServersList.length > 0 && (
+                          {/* Test Key Button */}
                           <button
                             type="button"
-                            onClick={() => setIsAddingNewServer(false)}
-                            className="text-slate-400 hover:text-white text-xs"
+                            onClick={() => handleTestUnifiedKey(k.id)}
+                            className="p-1.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 hover:text-white transition-colors cursor-pointer"
+                            title="تست اتصال و پینگ کلید"
                           >
-                            ✕
+                            <Activity className="w-3.5 h-3.5" />
                           </button>
-                        )}
-                      </div>
 
-                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-xs">
-                        <div>
-                          <label className="text-[11px] text-slate-300 block mb-1 font-semibold">عنوان یا برچسب سرور:</label>
-                          <input
-                            type="text"
-                            value={newServerName}
-                            onChange={(e) => setNewServerName(e.target.value)}
-                            placeholder="مثال: DeepSeek واسط ۱"
-                            className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white"
-                          />
-                        </div>
-
-                        <div>
-                          <label className="text-[11px] text-slate-300 block mb-1 font-semibold">آدرس سرور (Base URL):</label>
-                          <input
-                            type="text"
-                            value={newServerBaseUrl}
-                            onChange={(e) => setNewServerBaseUrl(e.target.value)}
-                            placeholder="https://api.deepseek.com/v1"
-                            className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs text-cyan-300 font-mono direction-ltr"
-                          />
-                        </div>
-
-                        <div>
-                          <label className="text-[11px] text-slate-300 block mb-1 font-semibold">نام مدل (Model):</label>
-                          <input
-                            type="text"
-                            value={newServerModel}
-                            onChange={(e) => setNewServerModel(e.target.value)}
-                            placeholder="deepseek-chat"
-                            className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs text-amber-300 font-mono direction-ltr"
-                          />
-                        </div>
-                      </div>
-
-                      {/* Quick Presets for Base URL */}
-                      <div className="flex items-center gap-2 flex-wrap text-[11px] text-slate-400 pt-1">
-                        <span className="text-slate-400">تنظیم سریع آدرس:</span>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setNewServerBaseUrl('https://api.deepseek.com/v1');
-                            setNewServerModel('deepseek-chat');
-                          }}
-                          className="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-cyan-300 font-mono cursor-pointer transition-colors"
-                        >
-                          DeepSeek مستقیم
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setNewServerBaseUrl('https://openrouter.ai/api/v1');
-                            setNewServerModel('deepseek/deepseek-chat');
-                          }}
-                          className="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-indigo-300 font-mono cursor-pointer transition-colors"
-                        >
-                          OpenRouter
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setNewServerBaseUrl('https://api.oneapi.net/v1');
-                            setNewServerModel('deepseek-chat');
-                          }}
-                          className="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-amber-300 font-mono cursor-pointer transition-colors"
-                        >
-                          OneAPI / واسط
-                        </button>
-                      </div>
-
-                      {/* Multiple API Keys Input Textarea */}
-                      <div className="flex flex-col gap-1 mt-1">
-                        <label className="text-[11px] text-slate-300 font-semibold flex items-center justify-between">
-                          <span>کلیدهای API برای این سرور (هر کلید در یک سطر — می‌توانید ده‌ها کلید وارد نمایید):</span>
-                          <span className="text-[10px] text-slate-400">یکجا اضافه و به لیست API های سرور افزوده می‌شوند</span>
-                        </label>
-                        <textarea
-                          rows={3}
-                          value={newServerKeysText}
-                          onChange={(e) => setNewServerKeysText(e.target.value)}
-                          placeholder={"sk-...\nsk-...\nsk-..."}
-                          className="w-full bg-slate-950 border border-slate-700 rounded-xl p-3 text-xs text-amber-300 font-mono focus:outline-none focus:border-cyan-500 direction-ltr placeholder-slate-600"
-                        />
-                      </div>
-
-                      <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-800">
-                        {customServersList.length > 0 && (
+                          {/* Delete Key Button */}
                           <button
                             type="button"
-                            onClick={() => setIsAddingNewServer(false)}
-                            className="px-3 py-1.5 text-xs text-slate-400 hover:text-white"
+                            onClick={() => handleDeleteUnifiedKey(k.id)}
+                            className="p-1.5 rounded-xl bg-rose-500/10 hover:bg-rose-500/20 text-rose-400 hover:text-rose-300 border border-rose-500/20 transition-colors cursor-pointer"
+                            title="حذف کلید از استخر"
                           >
-                            انصراف
+                            <Trash2 className="w-3.5 h-3.5" />
                           </button>
-                        )}
-                        <button
-                          type="submit"
-                          disabled={isSavingCustomServer}
-                          className="px-4 py-1.5 bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-bold rounded-xl shadow-md flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
-                        >
-                          {isSavingCustomServer ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <Check className="w-3.5 h-3.5" />}
-                          <span>ثبت و ذخیره این سرور و کلیدها</span>
-                        </button>
+                        </div>
                       </div>
-                    </form>
-                  )}
-
-                  {/* Registered Custom Servers Cards */}
-                  {customServersList.length > 0 && (
-                    <div className="flex flex-col gap-2.5">
-                      <span className="text-xs font-bold text-slate-300 flex items-center gap-1.5">
-                        <Server className="w-4 h-4 text-cyan-400" />
-                        <span>سرورهای کاستوم ثبت‌شده:</span>
-                      </span>
-
-                      <div className="grid grid-cols-1 gap-2.5">
-                        {customServersList.map((srv) => {
-                          const keysCount = Array.isArray(srv.apiKeys) && srv.apiKeys.length > 0
-                            ? srv.apiKeys.length
-                            : (srv.apiKey ? 1 : 0);
-
-                          return (
-                            <div
-                              key={srv.id}
-                              className={`p-3.5 rounded-2xl border transition-all flex flex-col md:flex-row md:items-center justify-between gap-3 ${
-                                srv.isEnabled !== false
-                                  ? 'bg-slate-900/90 border-slate-800 hover:border-cyan-500/40'
-                                  : 'bg-slate-950/60 border-slate-800/60 opacity-60'
-                              }`}
-                            >
-                              <div className="flex flex-col gap-1 min-w-0">
-                                <div className="flex items-center gap-2 flex-wrap">
-                                  <span className="font-bold text-white text-xs sm:text-sm">
-                                    {srv.name}
-                                  </span>
-                                  <span className="px-2 py-0.5 rounded-md text-[10px] font-mono bg-cyan-500/15 text-cyan-300 border border-cyan-500/30">
-                                    {srv.model}
-                                  </span>
-                                  <span className="px-2 py-0.5 rounded-md text-[10px] font-bold bg-amber-500/15 text-amber-300 border border-amber-500/30">
-                                    {keysCount} کلید فعال
-                                  </span>
-                                  <span className={`px-2 py-0.5 rounded-md text-[10px] font-bold border ${
-                                    srv.isEnabled !== false
-                                      ? 'bg-emerald-500/15 text-emerald-300 border-emerald-500/30'
-                                      : 'bg-slate-800 text-slate-400 border-slate-700'
-                                  }`}>
-                                    {srv.isEnabled !== false ? '✓ فعال در ترجمه' : 'غیرفعال'}
-                                  </span>
-                                </div>
-
-                                <div className="flex items-center gap-2 text-[11px] text-slate-400 font-mono truncate max-w-lg mt-0.5">
-                                  <span className="text-slate-500">آدرس:</span>
-                                  <span className="text-slate-300 truncate">{srv.baseUrl}</span>
-                                </div>
-                              </div>
-
-                              <div className="flex items-center gap-2 shrink-0 self-end md:self-center flex-wrap">
-                                <button
-                                  type="button"
-                                  onClick={() => handleTestCustomServer(srv)}
-                                  disabled={testingCustomServerId === srv.id}
-                                  className="px-3 py-1.5 rounded-xl bg-cyan-500/10 hover:bg-cyan-500/20 text-cyan-300 border border-cyan-500/30 text-xs font-bold transition-colors cursor-pointer flex items-center gap-1.5"
-                                  title="تست اتصال زنده و محاسبه زمان تاخیر سرور واسط"
-                                >
-                                  {testingCustomServerId === srv.id ? (
-                                    <Loader2 className="w-3.5 h-3.5 animate-spin text-cyan-400" />
-                                  ) : (
-                                    <Play className="w-3.5 h-3.5 text-cyan-400" />
-                                  )}
-                                  <span>تست زنده تاخیر</span>
-                                </button>
-
-                                <button
-                                  type="button"
-                                  onClick={() => handleToggleCustomServer(srv.id)}
-                                  className={`px-3 py-1.5 rounded-xl text-xs font-bold border transition-colors cursor-pointer ${
-                                    srv.isEnabled !== false
-                                      ? 'bg-amber-500/10 text-amber-300 border-amber-500/30 hover:bg-amber-500/20'
-                                      : 'bg-emerald-500/10 text-emerald-300 border-emerald-500/30 hover:bg-emerald-500/20'
-                                  }`}
-                                >
-                                  {srv.isEnabled !== false ? 'غیرفعال‌سازی' : 'فعال‌سازی'}
-                                </button>
-
-                                <button
-                                  type="button"
-                                  onClick={() => handleDeleteCustomServer(srv.id, srv.name)}
-                                  className="p-1.5 rounded-xl bg-slate-800 hover:bg-rose-500/20 text-slate-400 hover:text-rose-400 border border-slate-700 hover:border-rose-500/30 transition-colors cursor-pointer"
-                                  title="حذف این سرور"
-                                >
-                                  <Trash2 className="w-4 h-4" />
-                                </button>
-                              </div>
-                            </div>
-                          );
-                        })}
-                      </div>
-                    </div>
-                  )}
-                </div>
-
-                {/* Fallback Save Footer */}
-                <div className="flex items-center justify-end gap-2.5 pt-3 border-t border-slate-800">
-                  <button
-                    type="button"
-                    onClick={() => setIsKeysModalOpen(false)}
-                    className="px-4 py-2 rounded-xl text-xs font-semibold text-slate-400 hover:text-white bg-slate-800 hover:bg-slate-700 transition-colors cursor-pointer"
-                  >
-                    بستن پنجره
-                  </button>
-                  <button
-                    type="button"
-                    onClick={handleSaveFallbackConfig}
-                    disabled={isSavingFallback}
-                    className="px-5 py-2 rounded-xl text-xs font-bold text-white bg-emerald-600 hover:bg-emerald-500 shadow-md shadow-emerald-600/30 transition-colors flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
-                  >
-                    {isSavingFallback ? <Loader2 className="w-4 h-4 animate-spin" /> : <Check className="w-4 h-4" />}
-                    <span>ذخیره تنظیمات هوش‌های کمکی</span>
-                  </button>
-                </div>
+                    );
+                  });
+                })()}
               </div>
-            )}
+            </div>
+
+            {/* Modal Footer */}
+            <div className="flex items-center justify-between pt-3 border-t border-slate-800 flex-wrap gap-2">
+              <div className="text-xs text-slate-400 flex items-center gap-2">
+                <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+                <span>تمام کلیدها به عنوان همتاهای برابر (Peer) در یک استخر متوالی قرار دارند.</span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setIsKeysModalOpen(false)}
+                className="px-5 py-2 rounded-xl text-xs font-bold text-slate-300 hover:text-white bg-slate-800 hover:bg-slate-700 transition-colors cursor-pointer"
+              >
+                بستن پنجره
+              </button>
+            </div>
           </div>
         </div>
       )}

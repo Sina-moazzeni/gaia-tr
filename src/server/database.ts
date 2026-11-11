@@ -114,11 +114,30 @@ export interface FallbackAIConfig {
   providerLatencies?: Record<string, ProviderPingRecord>;
 }
 
+export interface UnifiedKeyEntry {
+  id: string;
+  provider: ProviderType;
+  key: string;
+  maskedKey: string;
+  name: string;
+  model: string;
+  baseUrl?: string;
+  priority: number;
+  isEnabled: boolean;
+  requestsCount: number;
+  totalTokens: number;
+  lastUsedAt?: string;
+  lastError?: string;
+  latencyMs?: number;
+  createdAt: string;
+}
+
 export interface SubtitlesDatabase {
   version: number;
   folders: ServerFolder[];
   projects: ServerSubtitleProject[];
   serverKeys: string[];
+  unifiedKeys?: UnifiedKeyEntry[];
   activeKeyIndex: number;
   serverConfig?: ServerConfig;
   fallbackAiConfig?: FallbackAIConfig;
@@ -220,6 +239,9 @@ function loadDatabaseFromDisk(): SubtitlesDatabase {
     }
     if (!parsed.customServers || !Array.isArray(parsed.customServers)) {
       parsed.customServers = [];
+    }
+    if (!parsed.unifiedKeys || !Array.isArray(parsed.unifiedKeys)) {
+      parsed.unifiedKeys = [];
     }
     if (!parsed.fallbackAiConfig) {
       parsed.fallbackAiConfig = { ...DEFAULT_FALLBACK_AI_CONFIG };
@@ -1008,16 +1030,29 @@ export function markKeyAsDisabled(key: string, reason: string = 'Service account
   disabledKeysMap.set(key, { timestamp: Date.now(), reason });
   console.warn(`[KeyPool] PERMANENTLY DISABLED KEY ${key.slice(0, 6)}...: ${reason}`);
 
-  // Automatically remove this dead key from db.serverKeys so it never interferes again
+  // Automatically purge this dead key from db.unifiedKeys, db.serverKeys, and customServers
   try {
     const db = getDatabase();
+    if (Array.isArray(db.unifiedKeys)) {
+      db.unifiedKeys = db.unifiedKeys.filter((k) => k.key !== key);
+      db.unifiedKeys.forEach((k, idx) => { k.priority = idx; });
+    }
     if (Array.isArray(db.serverKeys) && db.serverKeys.includes(key)) {
       db.serverKeys = db.serverKeys.filter((k) => k !== key);
       if (db.activeKeyIndex >= db.serverKeys.length) {
         db.activeKeyIndex = 0;
       }
-      saveDatabaseSync();
     }
+    if (Array.isArray(db.customServers)) {
+      db.customServers.forEach((srv) => {
+        if (srv.apiKey === key) srv.apiKey = '';
+        if (Array.isArray(srv.apiKeys)) {
+          srv.apiKeys = srv.apiKeys.filter((k) => k !== key);
+          if (!srv.apiKey && srv.apiKeys.length > 0) srv.apiKey = srv.apiKeys[0];
+        }
+      });
+    }
+    saveDatabaseSync();
   } catch (err) {
     console.error('[KeyPool] Error removing disabled key from db:', err);
   }
@@ -1332,6 +1367,415 @@ export function getKeyExhaustionStatus(): Array<{ keyMasked: string; isExhausted
     const keyMasked = len > 8 ? k.substring(0, 4) + '...' + k.substring(len - 4) : '****';
     return { keyMasked, isExhausted, cooldownRemainingSec };
   });
+}
+
+// ─── Unified Key Pool Operations (Single Peer Rotation & Seamless Failover) ──
+
+export function maskKeyString(k: string): string {
+  if (!k) return '****';
+  const clean = k.trim();
+  if (clean.length <= 8) return '****';
+  return clean.substring(0, 4) + '...' + clean.substring(clean.length - 4);
+}
+
+export function syncUnifiedKeysToLegacy(): void {
+  const db = getDatabase();
+  if (!Array.isArray(db.unifiedKeys)) return;
+
+  // 1. Sync Gemini keys
+  const geminiKeys = db.unifiedKeys
+    .filter((k) => k.provider === 'gemini' && k.isEnabled && !isKeyDisabled(k.key))
+    .map((k) => k.key);
+  db.serverKeys = geminiKeys;
+
+  // 2. Sync Custom servers
+  const customEntries = db.unifiedKeys.filter((k) => k.provider === 'custom');
+  if (customEntries.length > 0) {
+    if (!db.customServers) db.customServers = [];
+    const map = new Map<string, { name: string; baseUrl: string; model: string; keys: string[] }>();
+    customEntries.forEach((c) => {
+      const groupKey = `${c.baseUrl || ''}_${c.model}`;
+      if (!map.has(groupKey)) {
+        map.set(groupKey, {
+          name: c.name.replace(/\s*\(\d+\)$/, '').trim() || 'سرور سفارشی',
+          baseUrl: c.baseUrl || 'https://api.deepseek.com/v1',
+          model: c.model || 'deepseek-chat',
+          keys: [],
+        });
+      }
+      if (c.key && !map.get(groupKey)!.keys.includes(c.key)) {
+        map.get(groupKey)!.keys.push(c.key);
+      }
+    });
+
+    db.customServers = Array.from(map.values()).map((g, idx) => ({
+      id: `cs_${idx}_${Date.now()}`,
+      name: g.name,
+      baseUrl: g.baseUrl,
+      apiKey: g.keys[0] || '',
+      apiKeys: g.keys,
+      model: g.model,
+      isEnabled: true,
+      createdAt: new Date().toISOString(),
+      requestsCount: 0,
+      tokensCount: 0,
+    }));
+  }
+
+  // 3. Sync OpenAI & Claude keys
+  if (!db.fallbackAiConfig) db.fallbackAiConfig = { ...DEFAULT_FALLBACK_AI_CONFIG };
+  db.fallbackAiConfig.openaiKeys = db.unifiedKeys
+    .filter((k) => k.provider === 'openai' && k.isEnabled)
+    .map((k) => k.key);
+  db.fallbackAiConfig.claudeKeys = db.unifiedKeys
+    .filter((k) => k.provider === 'claude' && k.isEnabled)
+    .map((k) => k.key);
+}
+
+export function getUnifiedKeys(): UnifiedKeyEntry[] {
+  const db = getDatabase();
+  if (!db.unifiedKeys) {
+    db.unifiedKeys = [];
+  }
+
+  // Auto-migration on first call if unifiedKeys is empty
+  if (db.unifiedKeys.length === 0) {
+    let priorityCounter = 0;
+
+    // 1. Existing Gemini keys
+    if (Array.isArray(db.serverKeys)) {
+      db.serverKeys.forEach((key, idx) => {
+        if (!key || !key.trim()) return;
+        db.unifiedKeys!.push({
+          id: `uk_gemini_${Date.now()}_${idx}_${Math.random().toString(36).substring(2, 6)}`,
+          provider: 'gemini',
+          key: key.trim(),
+          maskedKey: maskKeyString(key),
+          name: `Gemini Key #${idx + 1}`,
+          model: 'gemini-2.5-flash',
+          priority: priorityCounter++,
+          isEnabled: true,
+          requestsCount: db.keyStats?.[key]?.requestsCount || 0,
+          totalTokens: db.keyStats?.[key]?.totalTokens || 0,
+          createdAt: new Date().toISOString(),
+        });
+      });
+    }
+
+    // 2. Custom servers (DeepSeek, proxy brokers)
+    const customServers = getCustomServers();
+    customServers.forEach((srv) => {
+      const keys = Array.isArray(srv.apiKeys) && srv.apiKeys.length > 0 ? srv.apiKeys : (srv.apiKey ? [srv.apiKey] : []);
+      keys.forEach((key, kIdx) => {
+        if (!key || !key.trim()) return;
+        db.unifiedKeys!.push({
+          id: `uk_custom_${Date.now()}_${kIdx}_${Math.random().toString(36).substring(2, 6)}`,
+          provider: 'custom',
+          key: key.trim(),
+          maskedKey: maskKeyString(key),
+          name: keys.length > 1 ? `${srv.name} (${kIdx + 1})` : srv.name,
+          model: srv.model || 'deepseek-chat',
+          baseUrl: srv.baseUrl || 'https://api.deepseek.com/v1',
+          priority: priorityCounter++,
+          isEnabled: srv.isEnabled !== false,
+          requestsCount: srv.requestsCount || 0,
+          totalTokens: srv.tokensCount || 0,
+          createdAt: new Date().toISOString(),
+        });
+      });
+    });
+
+    // 3. OpenAI keys
+    if (db.fallbackAiConfig?.openaiKeys && Array.isArray(db.fallbackAiConfig.openaiKeys)) {
+      db.fallbackAiConfig.openaiKeys.forEach((key, idx) => {
+        if (!key || !key.trim()) return;
+        db.unifiedKeys!.push({
+          id: `uk_openai_${Date.now()}_${idx}_${Math.random().toString(36).substring(2, 6)}`,
+          provider: 'openai',
+          key: key.trim(),
+          maskedKey: maskKeyString(key),
+          name: `OpenAI Key #${idx + 1}`,
+          model: db.fallbackAiConfig?.openaiModel || 'gpt-4o-mini',
+          priority: priorityCounter++,
+          isEnabled: true,
+          requestsCount: 0,
+          totalTokens: 0,
+          createdAt: new Date().toISOString(),
+        });
+      });
+    }
+
+    // 4. Claude keys
+    if (db.fallbackAiConfig?.claudeKeys && Array.isArray(db.fallbackAiConfig.claudeKeys)) {
+      db.fallbackAiConfig.claudeKeys.forEach((key, idx) => {
+        if (!key || !key.trim()) return;
+        db.unifiedKeys!.push({
+          id: `uk_claude_${Date.now()}_${idx}_${Math.random().toString(36).substring(2, 6)}`,
+          provider: 'claude',
+          key: key.trim(),
+          maskedKey: maskKeyString(key),
+          name: `Claude Key #${idx + 1}`,
+          model: db.fallbackAiConfig?.claudeModel || 'claude-3-5-haiku-20241022',
+          priority: priorityCounter++,
+          isEnabled: true,
+          requestsCount: 0,
+          totalTokens: 0,
+          createdAt: new Date().toISOString(),
+        });
+      });
+    }
+
+    if (db.unifiedKeys.length > 0) {
+      saveDatabaseSync();
+    }
+  }
+
+  return [...db.unifiedKeys].sort((a, b) => a.priority - b.priority);
+}
+
+export function addUnifiedKeys(
+  newEntries: Array<{
+    provider: ProviderType;
+    key: string;
+    name?: string;
+    model?: string;
+    baseUrl?: string;
+  }>
+): UnifiedKeyEntry[] {
+  const db = getDatabase();
+  const existing = getUnifiedKeys();
+  let maxPriority = existing.reduce((max, k) => Math.max(max, k.priority), -1);
+
+  const defaultModels: Record<ProviderType, string> = {
+    gemini: 'gemini-2.5-flash',
+    custom: 'deepseek-chat',
+    openai: 'gpt-4o-mini',
+    claude: 'claude-3-5-haiku-20241022',
+  };
+
+  const defaultNames: Record<ProviderType, string> = {
+    gemini: 'Google Gemini',
+    custom: 'سرور واسط / خصوصی',
+    openai: 'OpenAI GPT',
+    claude: 'Anthropic Claude',
+  };
+
+  newEntries.forEach((entry, idx) => {
+    const rawKey = entry.key?.trim();
+    if (!rawKey) return;
+
+    const found = db.unifiedKeys!.find((k) => k.key === rawKey && k.provider === entry.provider);
+    if (found) {
+      found.isEnabled = true;
+      resetKeyCooldown(rawKey);
+      return;
+    }
+
+    maxPriority++;
+    const provider = entry.provider || 'gemini';
+    const name = entry.name?.trim() || `${defaultNames[provider]} #${db.unifiedKeys!.length + 1}`;
+    const model = entry.model?.trim() || defaultModels[provider];
+    const baseUrl = provider === 'custom' ? (entry.baseUrl?.trim() || 'https://api.deepseek.com/v1') : undefined;
+
+    db.unifiedKeys!.push({
+      id: `uk_${provider}_${Date.now()}_${idx}_${Math.random().toString(36).substring(2, 6)}`,
+      provider,
+      key: rawKey,
+      maskedKey: maskKeyString(rawKey),
+      name,
+      model,
+      baseUrl,
+      priority: maxPriority,
+      isEnabled: true,
+      requestsCount: 0,
+      totalTokens: 0,
+      createdAt: new Date().toISOString(),
+    });
+
+    resetKeyCooldown(rawKey);
+  });
+
+  syncUnifiedKeysToLegacy();
+  saveDatabaseSync();
+  return getUnifiedKeys();
+}
+
+export function reorderUnifiedKeys(orderedIds: string[]): UnifiedKeyEntry[] {
+  const db = getDatabase();
+  const keys = getUnifiedKeys();
+  const idMap = new Map(keys.map((k) => [k.id, k]));
+
+  const newOrder: UnifiedKeyEntry[] = [];
+  orderedIds.forEach((id, idx) => {
+    const key = idMap.get(id);
+    if (key) {
+      key.priority = idx;
+      newOrder.push(key);
+      idMap.delete(id);
+    }
+  });
+
+  Array.from(idMap.values()).forEach((key) => {
+    key.priority = newOrder.length;
+    newOrder.push(key);
+  });
+
+  db.unifiedKeys = newOrder;
+  syncUnifiedKeysToLegacy();
+  saveDatabaseSync();
+  return getUnifiedKeys();
+}
+
+export function moveUnifiedKey(id: string, direction: 'up' | 'down'): UnifiedKeyEntry[] {
+  const keys = getUnifiedKeys();
+  const idx = keys.findIndex((k) => k.id === id);
+  if (idx === -1) return keys;
+
+  const targetIdx = direction === 'up' ? idx - 1 : idx + 1;
+  if (targetIdx < 0 || targetIdx >= keys.length) return keys;
+
+  const currentKey = keys[idx];
+  const targetKey = keys[targetIdx];
+  const tempPriority = currentKey.priority;
+  currentKey.priority = targetKey.priority;
+  targetKey.priority = tempPriority;
+
+  const db = getDatabase();
+  db.unifiedKeys = keys;
+  syncUnifiedKeysToLegacy();
+  saveDatabaseSync();
+  return getUnifiedKeys();
+}
+
+export function deleteUnifiedKey(id: string): UnifiedKeyEntry[] {
+  const db = getDatabase();
+  const keys = getUnifiedKeys();
+  const target = keys.find((k) => k.id === id);
+  if (target) {
+    resetKeyCooldown(target.key);
+    disabledKeysMap.delete(target.key);
+  }
+
+  db.unifiedKeys = keys.filter((k) => k.id !== id);
+  db.unifiedKeys.forEach((k, idx) => {
+    k.priority = idx;
+  });
+
+  syncUnifiedKeysToLegacy();
+  saveDatabaseSync();
+  return getUnifiedKeys();
+}
+
+export function deleteBatchUnifiedKeys(ids: string[]): UnifiedKeyEntry[] {
+  const db = getDatabase();
+  const keys = getUnifiedKeys();
+  const idSet = new Set(ids);
+
+  keys.forEach((k) => {
+    if (idSet.has(k.id)) {
+      resetKeyCooldown(k.key);
+      disabledKeysMap.delete(k.key);
+    }
+  });
+
+  db.unifiedKeys = keys.filter((k) => !idSet.has(k.id));
+  db.unifiedKeys.forEach((k, idx) => {
+    k.priority = idx;
+  });
+
+  syncUnifiedKeysToLegacy();
+  saveDatabaseSync();
+  return getUnifiedKeys();
+}
+
+export function purgeInvalidKeys(): { purgedCount: number; purgedKeys: string[] } {
+  const db = getDatabase();
+  const keys = getUnifiedKeys();
+  const deadKeys: string[] = [];
+
+  const remaining = keys.filter((k) => {
+    const isDead = isKeyDisabled(k.key) || disabledKeysMap.has(k.key) || k.lastError?.includes('401') || k.lastError?.includes('API_KEY_INVALID');
+    if (isDead) {
+      deadKeys.push(k.maskedKey);
+      resetKeyCooldown(k.key);
+      disabledKeysMap.delete(k.key);
+      return false;
+    }
+    return true;
+  });
+
+  remaining.forEach((k, idx) => {
+    k.priority = idx;
+  });
+
+  db.unifiedKeys = remaining;
+  syncUnifiedKeysToLegacy();
+  saveDatabaseSync();
+  return { purgedCount: deadKeys.length, purgedKeys: deadKeys };
+}
+
+export function updateUnifiedKey(id: string, updates: Partial<UnifiedKeyEntry>): UnifiedKeyEntry | null {
+  const db = getDatabase();
+  const keys = getUnifiedKeys();
+  const key = keys.find((k) => k.id === id);
+  if (!key) return null;
+
+  if (updates.name !== undefined) key.name = updates.name.trim() || key.name;
+  if (updates.model !== undefined) key.model = updates.model.trim() || key.model;
+  if (updates.baseUrl !== undefined) key.baseUrl = updates.baseUrl.trim() || key.baseUrl;
+  if (updates.isEnabled !== undefined) key.isEnabled = updates.isEnabled;
+  if (updates.priority !== undefined) key.priority = updates.priority;
+  if (updates.latencyMs !== undefined) key.latencyMs = updates.latencyMs;
+
+  db.unifiedKeys = keys;
+  syncUnifiedKeysToLegacy();
+  saveDatabaseSync();
+  return key;
+}
+
+export function batchSetModelUnifiedKeys(ids: string[], model: string): UnifiedKeyEntry[] {
+  const db = getDatabase();
+  const keys = getUnifiedKeys();
+  const idSet = new Set(ids);
+  const cleanModel = model?.trim();
+  if (!cleanModel) return keys;
+
+  keys.forEach((k) => {
+    if (ids.length === 0 || idSet.has(k.id)) {
+      k.model = cleanModel;
+    }
+  });
+
+  db.unifiedKeys = keys;
+  syncUnifiedKeysToLegacy();
+  saveDatabaseSync();
+  return getUnifiedKeys();
+}
+
+export function leaseAvailableUnifiedKey(excludeKeyIds: string[] = []): UnifiedKeyEntry | null {
+  const keys = getUnifiedKeys();
+  if (keys.length === 0) return null;
+
+  const excludedSet = new Set(excludeKeyIds);
+
+  // 1st pass: Pick the highest priority key that is enabled, valid, unexhausted, and not busy
+  for (const entry of keys) {
+    if (!entry.isEnabled) continue;
+    if (isKeyDisabled(entry.key)) continue;
+    if (isKeyExhausted(entry.key)) continue;
+    if (excludedSet.has(entry.id)) continue;
+    return entry;
+  }
+
+  // 2nd pass: If all non-busy keys are exhausted, check if any non-exhausted key can be shared
+  for (const entry of keys) {
+    if (!entry.isEnabled) continue;
+    if (isKeyDisabled(entry.key)) continue;
+    if (isKeyExhausted(entry.key)) continue;
+    return entry;
+  }
+
+  return null;
 }
 
 // ─── Project Retranslation & Incomplete Reset ────────────────────────────────

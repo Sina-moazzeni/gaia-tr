@@ -75,6 +75,16 @@ import {
   CustomServerConfig,
   setPriorityOrder,
   getProviderPings,
+  getUnifiedKeys,
+  addUnifiedKeys,
+  reorderUnifiedKeys,
+  moveUnifiedKey,
+  deleteUnifiedKey,
+  deleteBatchUnifiedKeys,
+  purgeInvalidKeys,
+  updateUnifiedKey,
+  batchSetModelUnifiedKeys,
+  UnifiedKeyEntry,
   ProviderType,
   ServerSubtitleProject
 } from './src/server/database';
@@ -2927,6 +2937,224 @@ app.post('/api/projects/:id/deprioritize', (req, res) => {
       success: true,
       project: updated,
       message: `فایل "${updated.name}" از لیست اضطراری خارج شد.`,
+    });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message });
+  }
+});
+
+// ─── Unified Key Pool API Endpoints ──────────────────────────────────────────
+
+// Get all unified keys with priority ordering, status, and stats
+app.get('/api/server/unified-keys', (req, res) => {
+  try {
+    const keys = getUnifiedKeys();
+    return res.json({
+      success: true,
+      count: keys.length,
+      keys,
+      activeCount: keys.filter((k) => k.isEnabled && !k.lastError?.includes('401')).length,
+    });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message });
+  }
+});
+
+// Add keys to the unified pool (batch Gemini, custom broker with multi-keys, OpenAI, Claude)
+app.post('/api/server/unified-keys/add', (req, res) => {
+  try {
+    const body = req.body || {};
+    let entriesToAdd: Array<{
+      provider: ProviderType;
+      key: string;
+      name?: string;
+      model?: string;
+      baseUrl?: string;
+    }> = [];
+
+    if (Array.isArray(body.keys) && typeof body.keys[0] === 'object') {
+      entriesToAdd = body.keys;
+    } else if (body.provider && body.rawKeys) {
+      const lines = typeof body.rawKeys === 'string'
+        ? body.rawKeys.split(/[\r\n,]+/)
+        : (Array.isArray(body.rawKeys) ? body.rawKeys : []);
+
+      lines.forEach((line: string, idx: number) => {
+        const clean = line.trim();
+        if (clean) {
+          entriesToAdd.push({
+            provider: body.provider,
+            key: clean,
+            name: body.name ? (lines.length > 1 ? `${body.name} (${idx + 1})` : body.name) : undefined,
+            model: body.model,
+            baseUrl: body.baseUrl,
+          });
+        }
+      });
+    }
+
+    if (entriesToAdd.length === 0) {
+      return res.status(400).json({ success: false, error: 'هیچ کلید معتبری ارسال نشده است.' });
+    }
+
+    const updated = addUnifiedKeys(entriesToAdd);
+    return res.json({
+      success: true,
+      count: updated.length,
+      addedCount: entriesToAdd.length,
+      keys: updated,
+      message: `تعداد ${entriesToAdd.length} کلید با موفقیت به استخر یکپارچه اضافه شد.`,
+    });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message });
+  }
+});
+
+// Reorder unified keys priority
+app.post('/api/server/unified-keys/reorder', (req, res) => {
+  try {
+    const { orderedIds } = req.body || {};
+    if (!Array.isArray(orderedIds)) {
+      return res.status(400).json({ success: false, error: 'orderedIds must be an array of IDs' });
+    }
+    const updated = reorderUnifiedKeys(orderedIds);
+    return res.json({ success: true, keys: updated });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message });
+  }
+});
+
+// Move key up/down
+app.post('/api/server/unified-keys/move', (req, res) => {
+  try {
+    const { id, direction } = req.body || {};
+    if (!id || (direction !== 'up' && direction !== 'down')) {
+      return res.status(400).json({ success: false, error: 'Invalid id or direction' });
+    }
+    const updated = moveUnifiedKey(id, direction);
+    return res.json({ success: true, keys: updated });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message });
+  }
+});
+
+// Update single key (model, name, baseUrl, isEnabled)
+app.patch('/api/server/unified-keys/:id', (req, res) => {
+  try {
+    const { id } = req.params;
+    const updated = updateUnifiedKey(id, req.body || {});
+    if (!updated) return res.status(404).json({ success: false, error: 'Key not found' });
+    return res.json({ success: true, key: updated });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message });
+  }
+});
+
+// Delete single key
+app.delete('/api/server/unified-keys/:id', (req, res) => {
+  try {
+    const { id } = req.params;
+    const remaining = deleteUnifiedKey(id);
+    return res.json({ success: true, keys: remaining, message: 'کلید با موفقیت حذف شد.' });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message });
+  }
+});
+
+// Batch delete keys
+app.post('/api/server/unified-keys/batch-delete', (req, res) => {
+  try {
+    const { ids } = req.body || {};
+    if (!Array.isArray(ids)) {
+      return res.status(400).json({ success: false, error: 'ids must be an array' });
+    }
+    const remaining = deleteBatchUnifiedKeys(ids);
+    return res.json({ success: true, keys: remaining, count: ids.length, message: `تعداد ${ids.length} کلید با موفقیت حذف شدند.` });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message });
+  }
+});
+
+// Batch set model
+app.post('/api/server/unified-keys/batch-set-model', (req, res) => {
+  try {
+    const { ids = [], model } = req.body || {};
+    if (!model) return res.status(400).json({ success: false, error: 'مدل جدید الزامی است.' });
+    const updated = batchSetModelUnifiedKeys(ids, model);
+    return res.json({ success: true, keys: updated, message: `مدل کلیدها به ${model} تغییر یافت.` });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message });
+  }
+});
+
+// Purge all invalid / 401 keys
+app.post('/api/server/unified-keys/purge-invalid', (req, res) => {
+  try {
+    const result = purgeInvalidKeys();
+    return res.json({
+      success: true,
+      purgedCount: result.purgedCount,
+      purgedKeys: result.purgedKeys,
+      keys: getUnifiedKeys(),
+      message: result.purgedCount > 0
+        ? `تعداد ${result.purgedCount} کلید نامعتبر یا منقضی (401) با موفقیت به طور خودکار از دیتابیس پاکسازی شدند.`
+        : 'هیچ کلید نامعتبر یا منقضی در استخر یافت نشد؛ تمامی کلیدها سالم هستند.',
+    });
+  } catch (err: any) {
+    return res.status(500).json({ success: false, error: err?.message });
+  }
+});
+
+// Test single unified key
+app.post('/api/server/unified-keys/test/:id', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const keys = getUnifiedKeys();
+    const target = keys.find((k) => k.id === id);
+    if (!target) return res.status(404).json({ success: false, error: 'Key not found' });
+
+    const start = Date.now();
+    let isOk = false;
+    let message = '';
+
+    if (target.provider === 'gemini') {
+      try {
+        const ai = new GoogleGenAI({ apiKey: target.key });
+        const resp = await ai.models.generateContent({
+          model: target.model || 'gemini-2.5-flash',
+          contents: 'Ping test',
+          config: { maxOutputTokens: 5 },
+        });
+        isOk = Boolean(resp.text);
+        message = isOk ? 'اتصال به Gemini موفق بود.' : 'پاسخ خالی از Gemini دریافت شد.';
+      } catch (e: any) {
+        message = e?.message || String(e);
+        if (message.includes('401') || message.includes('API_KEY_INVALID')) {
+          deleteUnifiedKey(target.id);
+          return res.json({ success: false, latencyMs: Date.now() - start, message: 'کلید نامعتبر (401) بود و به طور خودکار پاک شد.', isPurged: true });
+        }
+      }
+    } else {
+      const result = await testFallbackProvider(
+        target.provider === 'custom' ? 'custom' : (target.provider === 'openai' ? 'openai' : 'claude'),
+        target.key,
+        { baseUrl: target.baseUrl, model: target.model }
+      );
+      isOk = result.success;
+      message = result.message;
+      if (!isOk && (message.includes('401') || String(result.error).includes('401'))) {
+        deleteUnifiedKey(target.id);
+        return res.json({ success: false, latencyMs: result.latencyMs, message: 'کلید نامعتبر (401) بود و به طور خودکار پاک شد.', isPurged: true });
+      }
+    }
+
+    const latencyMs = Date.now() - start;
+    updateUnifiedKey(target.id, { latencyMs });
+
+    return res.json({
+      success: isOk,
+      latencyMs,
+      message: isOk ? `تست موفق (${latencyMs}ms): ${message}` : `خطا در اتصال: ${message}`,
     });
   } catch (err: any) {
     return res.status(500).json({ success: false, error: err?.message });
