@@ -1710,8 +1710,14 @@ export async function testFallbackProvider(
       if (res.ok) {
         return { success: true, latencyMs, message: `اتصال به سرویس سفارشی (${model}) موفق بود.` };
       }
-      const err = await res.text();
-      return { success: false, latencyMs, message: `خطا در سرویس سفارشی: ${res.status}`, error: err.slice(0, 200) };
+      const errText = await res.text();
+      let detailMsg = '';
+      try {
+        const parsedErr = JSON.parse(errText);
+        detailMsg = parsedErr?.error?.message || parsedErr?.message || '';
+      } catch {}
+      const fullMsg = detailMsg ? `خطای سرویس (${res.status}): ${detailMsg}` : `خطا در سرویس سفارشی: ${res.status}`;
+      return { success: false, latencyMs, message: fullMsg, error: errText.slice(0, 300) };
     }
   } catch (err: any) {
     const latencyMs = Date.now() - start;

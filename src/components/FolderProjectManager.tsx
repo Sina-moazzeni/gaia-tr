@@ -2174,6 +2174,29 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
           </div>
 
           <div className="flex items-center gap-2 flex-wrap">
+            {/* Backup & Restore Controls */}
+            <button
+              type="button"
+              onClick={handleDownloadBackup}
+              className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold bg-slate-800/80 text-cyan-300 hover:bg-slate-800 hover:text-cyan-200 border border-cyan-500/30 transition-colors shadow-xs cursor-pointer active:scale-98"
+              title="دانلود فایل پشتیبان کامل دیتابیس سرور شامل تمام پروژه‌ها و زیرنویس‌ها"
+            >
+              <Download className="w-3.5 h-3.5 text-cyan-400" />
+              <span>پشتیبان‌گیری (Backup)</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setIsRestoreModalOpen(true)}
+              className="flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold bg-slate-800/80 text-amber-300 hover:bg-slate-800 hover:text-amber-200 border border-amber-500/30 transition-colors shadow-xs cursor-pointer active:scale-98"
+              title="بازیابی و وارد کردن کل دیتابیس از فایل JSON پشتیبان"
+            >
+              <UploadCloud className="w-3.5 h-3.5 text-amber-400" />
+              <span>بازیابی بکاپ (Restore)</span>
+            </button>
+
+            <span className="hidden sm:inline-block w-px h-5 bg-slate-800 mx-0.5" />
+
             <button
               type="button"
               onClick={() => {
