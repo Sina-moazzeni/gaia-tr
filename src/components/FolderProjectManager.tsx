@@ -531,13 +531,14 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
     }
   };
 
-  const handleSetDualConcurrency = async (files?: number, _keysPerProject?: number) => {
+  const handleSetDualConcurrency = async (files?: number, keysPerProject?: number) => {
     try {
       const targetFiles = files || serverConfig.maxConcurrentProjects || 4;
       const validFiles = Math.max(1, Math.min(targetFiles, 50));
+      const targetKeysPerFile = keysPerProject || serverConfig.maxKeysPerProject || 2;
       const payload: Record<string, any> = {
         maxConcurrentProjects: validFiles,
-        maxKeysPerProject: 1, // Strictly 1 dedicated key per file
+        maxKeysPerProject: targetKeysPerFile,
       };
 
       const res = await fetch('/api/server/config', {
@@ -549,14 +550,14 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
       if (data.success && data.config) {
         setServerConfig(data.config);
         setCustomConcurrentInput(String(data.config.maxConcurrentProjects));
-        onShowToast(`ظرفیت همزمانی سرور تنظیم شد: دقیقاً ${data.config.maxConcurrentProjects} فایل همزمان (هر فایل ۱ کلید اختصاصی از استخر).`, 'success');
+        onShowToast(`ظرفیت همزمانی سرور تنظیم شد: ${data.config.maxConcurrentProjects} فایل همزمان (${data.config.maxKeysPerProject || 2} کلید موازی برای هر فایل).`, 'success');
       }
     } catch {
       onShowToast('خطا در به‌روزرسانی تنظیمات سرور', 'error');
     }
   };
 
-  const handleSetConcurrency = (val: number) => handleSetDualConcurrency(val, 1);
+  const handleSetConcurrency = (val: number) => handleSetDualConcurrency(val, serverConfig.maxKeysPerProject || 2);
 
   // Upload state
   const [isUploading, setIsUploading] = useState(false);
@@ -2347,13 +2348,13 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
                       <button
                         key={num}
                         type="button"
-                        onClick={() => handleSetDualConcurrency(num, 1)}
+                        onClick={() => handleSetDualConcurrency(num, serverConfig.maxKeysPerProject || 2)}
                         className={`relative px-3 py-1.5 rounded-xl font-mono font-bold text-xs transition-all cursor-pointer ${
                           isSelected
                             ? 'bg-gradient-to-r from-indigo-600 to-violet-600 text-white shadow-lg shadow-indigo-600/40 border border-indigo-400 scale-105'
                             : 'bg-slate-800/90 text-slate-300 hover:text-white hover:bg-slate-700 border border-slate-700/70'
                         }`}
-                        title={`ترجمه همزمان ${num} فایل با ${num} کلید مجزا (بقیه در رزرو)`}
+                        title={`ترجمه همزمان ${num} فایل`}
                       >
                         <span>{num} فایل</span>
                         {isDefault && (
@@ -2383,7 +2384,7 @@ export const FolderProjectManager: React.FC<FolderProjectManagerProps> = ({
                       type="button"
                       onClick={() => {
                         const val = parseInt(customConcurrentInput, 10);
-                        if (!isNaN(val) && val >= 1) handleSetDualConcurrency(val, 1);
+                        if (!isNaN(val) && val >= 1) handleSetDualConcurrency(val, serverConfig.maxKeysPerProject || 2);
                       }}
                       className="px-2.5 py-1 bg-indigo-600 hover:bg-indigo-500 text-white rounded-lg text-[11px] font-bold cursor-pointer transition-colors"
                       title="تنظیم دقیق تعداد فایل‌های همزمان"

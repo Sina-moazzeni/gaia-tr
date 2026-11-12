@@ -1094,7 +1094,7 @@ export function clearAllDisabledKeys(): void {
 // ─── Key Exhaustion & Cooldown Tracking ──────────────────────────────────────
 
 export const exhaustedKeysMap = new Map<string, ExhaustionEntry>();
-const MINUTE_COOLDOWN_MS = 45 * 1000; // 45 seconds rolling minute rate limit (RPM)
+const MINUTE_COOLDOWN_MS = 12 * 1000; // Fast 12-second recovery for minute rate limit (RPM)
 const DAILY_COOLDOWN_MS = 14 * 60 * 60 * 1000; // 14 hours for daily quota limit (RPD)
 
 export function isDailyQuotaError(errorMessage: string): boolean {
@@ -1906,6 +1906,7 @@ export function resetFolderTranslationFromScratch(folderId: string): { count: nu
     project.updatedAt = new Date().toISOString();
   });
 
+  resetAllKeyCooldowns(false);
   saveDatabaseSync();
   return { count: projectsInFolder.length, folderName, projectIds };
 }

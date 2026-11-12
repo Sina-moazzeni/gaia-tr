@@ -75,17 +75,17 @@ export function setActiveTranslationModel(model: string): string {
 }
 
 // Quota-Optimized High-Speed batch sizes:
-// 35 cues per standard request, 20 cues near end (<= 120 cues remaining).
+// 50 cues per standard request, 30 cues near end (<= 100 cues remaining).
 // Drastically cuts request count per file by 35-40% while preserving ultra-speed sub-second translations!
-const BATCH_SIZE = 35;
-const NEAR_END_BATCH_SIZE = 20;
+const BATCH_SIZE = 50;
+const NEAR_END_BATCH_SIZE = 30;
 
 // Strict RPM Rate-Limiter per key (Prevents 429 quota exhaustion on Gemini free tier: max 15 RPM)
-// Enforces a minimum 4.2-second gap between requests on the same key AND a rolling 60-second limit of max 13 requests.
+// Enforces a minimum 4.0-second gap between requests on the same key AND a rolling 60-second limit of max 15 requests.
 const lastKeyCallTime = new Map<string, number>();
 const keyCallHistory = new Map<string, number[]>();
-export const MIN_CALL_GAP_PER_KEY_MS = 4200; // at least 4.2s gap between requests on the same key
-export const MAX_RPM_PER_KEY = 13; // safe ceiling below 15 RPM limit
+export const MIN_CALL_GAP_PER_KEY_MS = 4000; // exact 4.0s gap between requests on the same key (60s / 15 = 4s)
+export const MAX_RPM_PER_KEY = 15; // exact 15 RPM limit for Gemini free tier
 
 export function isKeyRateLimited(key: string): boolean {
   const now = Date.now();
@@ -132,6 +132,7 @@ const inFlightCueTimestamps = new Map<string, number>();
 const busyKeys = new Set<string>();
 const busyKeyTimestamps = new Map<string, number>();
 const cueRetryCountMap = new Map<string, number>();
+const inFlightProjectChunkCount = new Map<string, number>();
 
 export function clearAllStuckLocks(): void {
   inFlightCueKeys.clear();
@@ -139,6 +140,7 @@ export function clearAllStuckLocks(): void {
   busyKeys.clear();
   busyKeyTimestamps.clear();
   activeProjectWorkingSet.clear();
+  inFlightProjectChunkCount.clear();
   console.log('[BackgroundWorker] Watchdog: All in-flight, busy locks, and active project sets manually cleared.');
 }
 
@@ -721,7 +723,15 @@ export async function translateWithUnifiedKey(
     const startTime = Date.now();
 
     try {
+      // Proactive micro-pacing for Gemini 15 RPM free tier: 4000ms strictly maintained per key
+      const lastCall = lastKeyCallTime.get(unifiedKey.key) || 0;
+      const elapsedSinceLastCall = Date.now() - lastCall;
+      if (elapsedSinceLastCall < MIN_CALL_GAP_PER_KEY_MS) {
+        const waitMs = MIN_CALL_GAP_PER_KEY_MS - elapsedSinceLastCall;
+        await new Promise((r) => setTimeout(r, waitMs));
+      }
       recordKeyCall(unifiedKey.key);
+
       const ai = createGenAI(unifiedKey.key);
       const response = await ai.models.generateContent({
         model: modelToUse,
@@ -775,8 +785,7 @@ export async function translateWithUnifiedKey(
         const isDaily = isDailyQuotaError(msg);
         markKeyAsExhausted(unifiedKey.key, isDaily ? 'Daily limit' : 'RPM limit', isDaily);
       } else {
-        console.warn(`[BackgroundWorker] Non-quota error on key ${unifiedKey.maskedKey}: ${msg.slice(0, 150)}. Marking short rest so next key takes over.`);
-        markKeyAsExhausted(unifiedKey.key, `خطای شبکه/سرویس: ${msg.slice(0, 80)}`, false);
+        console.warn(`[BackgroundWorker] Transient non-quota error on key ${unifiedKey.maskedKey}: ${msg.slice(0, 150)}. Not locking key.`);
       }
       return null;
     }
@@ -2036,10 +2045,11 @@ async function processTick(): Promise<void> {
     }
 
     // Strict Concurrency Architecture:
-    // Exactly honors user-defined maxConcurrentProjects (e.g. 2, 4, 10).
-    const maxActiveFiles = Math.max(1, Math.min(config.maxConcurrentProjects || 2, 24));
+    // Honors user-defined maxConcurrentProjects (e.g. 2, 4, 10) AND maxKeysPerProject (e.g. 2 or 3 keys per file).
+    const maxActiveFiles = Math.max(1, Math.min(config.maxConcurrentProjects || 4, 24));
+    const maxKeysPerFile = Math.max(1, Math.min(config.maxKeysPerProject || 2, 4));
     const activeAvailableKeys = allKeys.filter((k) => !isKeyDisabled(k) && !isKeyExhausted(k));
-    const totalMaxKeyThreads = Math.min(activeAvailableKeys.length, maxActiveFiles);
+    const totalMaxKeyThreads = Math.min(activeAvailableKeys.length, maxActiveFiles * maxKeysPerFile);
 
     // Check how many worker key slots are open
     let availableKeySlots = totalMaxKeyThreads - busyKeys.size;
@@ -2177,111 +2187,119 @@ async function processTick(): Promise<void> {
       return remA - remB;
     });
 
-    // 3. Multi-File Dispatching Loop:
-    for (const project of candidateProjects) {
-      if (availableKeySlots <= 0) break;
+    // 3. Multi-File & Multi-Key Concurrent Dispatching Loop:
+    let progressMadeInPass = true;
+    while (availableKeySlots > 0 && progressMadeInPass) {
+      progressMadeInPass = false;
 
-      // If this file already has a chunk in flight, wait for that chunk to return
-      if (currentlyInFlightProjectIds.has(project.id)) {
-        continue;
-      }
+      for (const project of candidateProjects) {
+        if (availableKeySlots <= 0) break;
 
-      // Concurrency check: If project is NOT already in active working set,
-      // can only admit it if working set size < maxActiveFiles!
-      if (!activeProjectWorkingSet.has(project.id)) {
-        if (activeProjectWorkingSet.size >= maxActiveFiles) {
-          // Do not admit more files! We are strictly at the user's limit (e.g. 2 files)
+        const currentInFlight = inFlightProjectChunkCount.get(project.id) || 0;
+        if (currentInFlight >= maxKeysPerFile) {
           continue;
         }
-        activeProjectWorkingSet.add(project.id);
-      }
 
-      const untranslatedCues = project.items.filter(
-        (item) => !item.translatedText || !item.translatedText.trim()
-      );
-      if (untranslatedCues.length === 0) {
-        project.status = 'completed';
-        project.completedAt = project.completedAt || new Date().toISOString();
-        activeProjectWorkingSet.delete(project.id);
-        continue;
-      }
-
-      const availableCues = untranslatedCues.filter((c) => !inFlightCueKeys.has(project.id + '_' + c.id));
-      if (availableCues.length === 0) continue;
-
-      // Lease a dedicated key from the unified pool (excluding keys currently busy or in short RPM gap)
-      const busyOrRateLimited = [...Array.from(busyKeys), ...allKeys.filter((k) => isKeyRateLimited(k))];
-      let leasedUnified = leaseAvailableUnifiedKey(busyOrRateLimited);
-      if (!leasedUnified) {
-        leasedUnified = leaseAvailableUnifiedKey(Array.from(busyKeys));
-      }
-      const keyInfo = leasedUnified ? { key: leasedUnified.key } : leaseAvailableKey(Array.from(busyKeys));
-      if (!keyInfo) break; // All remaining keys are either busy, exhausted, or disabled
-
-      const leasedKey = keyInfo.key;
-      busyKeys.add(leasedKey);
-      availableKeySlots--;
-
-      // Adaptive chunk size with COMPLETION AFFINITY:
-      // When <= 25 cues remain, grab ALL of them in one final batch so the file completes to 100% immediately!
-      // When <= 120 cues remain, use NEAR_END_BATCH_SIZE (15 cues) for superfast sub-second translations.
-      // Standard batches use BATCH_SIZE (25 cues).
-      let targetChunkSize = BATCH_SIZE;
-      if (availableCues.length <= 25) {
-        targetChunkSize = availableCues.length; // Grab everything remaining to hit 100%!
-      } else if (untranslatedCues.length <= 120) {
-        targetChunkSize = NEAR_END_BATCH_SIZE;
-      }
-
-      const chunkSize = Math.min(availableCues.length, targetChunkSize);
-      const chunkCues = availableCues.slice(0, chunkSize);
-
-      const nowDispatch = Date.now();
-      chunkCues.forEach((c) => {
-        const k = project.id + '_' + c.id;
-        inFlightCueKeys.add(k);
-        inFlightCueTimestamps.set(k, nowDispatch);
-      });
-      busyKeys.add(leasedKey);
-      busyKeyTimestamps.set(leasedKey, nowDispatch);
-      currentlyInFlightProjectIds.add(project.id);
-
-      project.status = 'translating';
-      project.hasDisruption = false;
-      project.workerKeyUsed = leasedUnified ? `${leasedUnified.name} (${leasedUnified.maskedKey})` : leasedKey;
-      scheduleSaveDatabase();
-
-      void (async () => {
-        try {
-          await processProjectChunkBatch(project.id, chunkCues, leasedKey);
-        } catch (e) {
-          console.error(`[BackgroundWorker] Unexpected error in worker for ${project.id}:`, e);
-        } finally {
-          chunkCues.forEach((c) => {
-            const k = project.id + '_' + c.id;
-            inFlightCueKeys.delete(k);
-            inFlightCueTimestamps.delete(k);
-          });
-          busyKeys.delete(leasedKey);
-          busyKeyTimestamps.delete(leasedKey);
-
-          // Check if project has completed 100%
-          const liveProj = getProjectById(project.id);
-          if (liveProj) {
-            const remaining = (liveProj.items || []).filter((i) => !i.translatedText || !i.translatedText.trim()).length;
-            if (remaining === 0 || liveProj.translatedCues >= liveProj.totalCues) {
-              liveProj.status = 'completed';
-              liveProj.completedAt = liveProj.completedAt || new Date().toISOString();
-              activeProjectWorkingSet.delete(project.id);
-            }
+        // Concurrency check: If project is NOT already in active working set,
+        // can only admit it if working set size < maxActiveFiles!
+        if (!activeProjectWorkingSet.has(project.id)) {
+          if (activeProjectWorkingSet.size >= maxActiveFiles) {
+            // Do not admit more files than configured maxActiveFiles
+            continue;
           }
-
-          // Trigger next tick immediately to continue next chunk or next file
-          setTimeout(() => {
-            void processTick();
-          }, 50);
+          activeProjectWorkingSet.add(project.id);
         }
-      })();
+
+        const untranslatedCues = project.items.filter(
+          (item) => !item.translatedText || !item.translatedText.trim()
+        );
+        if (untranslatedCues.length === 0) {
+          project.status = 'completed';
+          project.completedAt = project.completedAt || new Date().toISOString();
+          activeProjectWorkingSet.delete(project.id);
+          continue;
+        }
+
+        const availableCues = untranslatedCues.filter((c) => !inFlightCueKeys.has(project.id + '_' + c.id));
+        if (availableCues.length === 0) continue;
+
+        // Lease a dedicated key from the pool (excluding keys currently busy)
+        let leasedUnified = leaseAvailableUnifiedKey(Array.from(busyKeys));
+        const keyInfo = leasedUnified ? { key: leasedUnified.key } : leaseAvailableKey(Array.from(busyKeys));
+        if (!keyInfo) break; // All available keys are currently busy in flight
+
+        const leasedKey = keyInfo.key;
+        busyKeys.add(leasedKey);
+        availableKeySlots--;
+
+        // Adaptive chunk size with COMPLETION AFFINITY:
+        // When <= 30 cues remain, grab ALL of them in one final batch so the file completes to 100% immediately!
+        // When <= 100 cues remain, use NEAR_END_BATCH_SIZE (30 cues).
+        // Standard batches use BATCH_SIZE (50 cues).
+        let targetChunkSize = BATCH_SIZE;
+        if (availableCues.length <= 30) {
+          targetChunkSize = availableCues.length;
+        } else if (untranslatedCues.length <= 100) {
+          targetChunkSize = NEAR_END_BATCH_SIZE;
+        }
+
+        const chunkSize = Math.min(availableCues.length, targetChunkSize);
+        const chunkCues = availableCues.slice(0, chunkSize);
+
+        const nowDispatch = Date.now();
+        chunkCues.forEach((c) => {
+          const k = project.id + '_' + c.id;
+          inFlightCueKeys.add(k);
+          inFlightCueTimestamps.set(k, nowDispatch);
+        });
+        busyKeyTimestamps.set(leasedKey, nowDispatch);
+        inFlightProjectChunkCount.set(project.id, currentInFlight + 1);
+
+        project.status = 'translating';
+        project.hasDisruption = false;
+        project.workerKeyUsed = leasedUnified ? `${leasedUnified.name} (${leasedUnified.maskedKey})` : leasedKey;
+        scheduleSaveDatabase();
+        progressMadeInPass = true;
+
+        void (async () => {
+          try {
+            await processProjectChunkBatch(project.id, chunkCues, leasedKey);
+          } catch (e) {
+            console.error(`[BackgroundWorker] Unexpected error in worker for ${project.id}:`, e);
+          } finally {
+            chunkCues.forEach((c) => {
+              const k = project.id + '_' + c.id;
+              inFlightCueKeys.delete(k);
+              inFlightCueTimestamps.delete(k);
+            });
+            busyKeys.delete(leasedKey);
+            busyKeyTimestamps.delete(leasedKey);
+
+            const activeCh = inFlightProjectChunkCount.get(project.id) || 1;
+            if (activeCh <= 1) {
+              inFlightProjectChunkCount.delete(project.id);
+            } else {
+              inFlightProjectChunkCount.set(project.id, activeCh - 1);
+            }
+
+            // Check if project has completed 100%
+            const liveProj = getProjectById(project.id);
+            if (liveProj) {
+              const remaining = (liveProj.items || []).filter((i) => !i.translatedText || !i.translatedText.trim()).length;
+              if (remaining === 0 || liveProj.translatedCues >= liveProj.totalCues) {
+                liveProj.status = 'completed';
+                liveProj.completedAt = liveProj.completedAt || new Date().toISOString();
+                activeProjectWorkingSet.delete(project.id);
+              }
+            }
+
+            // Trigger next tick immediately to continue next chunk or next file
+            setTimeout(() => {
+              void processTick();
+            }, 50);
+          }
+        })();
+      }
     }
   } finally {
     isTickRunning = false;
