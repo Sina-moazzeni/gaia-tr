@@ -50,13 +50,9 @@ import { SubtitleItem } from '../types';
 // Primary & Fallback Models hierarchy:
 // Strictly Gemini 3 series ONLY. NO series 2 models!
 // Official Google Gemini 3.1 Flash Lite as primary ultra-speed engine, with Gemini Flash Latest and Gemini 3.8 Flash as fallbacks.
-export const PRIMARY_MODEL = 'gemini-3.5-flash-lite';
+export const PRIMARY_MODEL = 'gemini-3.1-flash-lite';
 export const FALLBACK_MODELS = [
-  'gemini-3.5-flash-lite',
-  'gemini-3.7-flash',
   'gemini-3.1-flash-lite',
-  'gemini-2.5-flash',
-  'gemini-2.5-flash-lite',
   'gemini-flash-latest',
   'gemini-3.8-flash'
 ];
@@ -751,7 +747,7 @@ export async function translateWithUnifiedKey(
             candidates: usage?.candidatesTokenCount || 0,
             total: usage?.totalTokenCount || 0,
           },
-          keyUsed: unifiedKey.maskedKey,
+          keyUsed: unifiedKey.key,
         };
       }
       throw new Error('پاسخ مدل نامعتبر یا خالی بود.');
@@ -830,7 +826,7 @@ export async function translateWithUnifiedKey(
           return {
             translations: parsed,
             tokens: { prompt: promptTok, candidates: compTok, total: totalTok },
-            keyUsed: `${unifiedKey.name} (${unifiedKey.maskedKey})`,
+            keyUsed: unifiedKey.key,
           };
         }
       }
@@ -893,7 +889,7 @@ export async function translateWithUnifiedKey(
           return {
             translations: parsed,
             tokens: { prompt: promptTok, candidates: compTok, total: totalTok },
-            keyUsed: `OpenAI (${unifiedKey.maskedKey})`,
+            keyUsed: unifiedKey.key,
           };
         }
       }
@@ -951,7 +947,7 @@ export async function translateWithUnifiedKey(
           return {
             translations: parsed,
             tokens: { prompt: promptTok, candidates: compTok, total: totalTok },
-            keyUsed: `Claude (${unifiedKey.maskedKey})`,
+            keyUsed: unifiedKey.key,
           };
         }
       }

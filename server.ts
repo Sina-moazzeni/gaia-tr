@@ -1,7 +1,13 @@
 import express from 'express';
+import dns from 'dns';
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
+
+// Force IPv4 first to eliminate 10-15s IPv6 handshake timeouts on Windows Server / VPS
+try {
+  dns.setDefaultResultOrder('ipv4first');
+} catch {}
 import { GoogleGenAI, Type, HarmCategory, HarmBlockThreshold } from '@google/genai';
 import dotenv from 'dotenv';
 import { createServer as createViteServer } from 'vite';

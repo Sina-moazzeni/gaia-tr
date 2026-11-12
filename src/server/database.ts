@@ -126,6 +126,8 @@ export interface UnifiedKeyEntry {
   isEnabled: boolean;
   requestsCount: number;
   totalTokens: number;
+  promptTokens?: number;
+  candidatesTokens?: number;
   lastUsedAt?: string;
   lastError?: string;
   latencyMs?: number;
@@ -182,9 +184,9 @@ export const DEFAULT_FALLBACK_AI_CONFIG: FallbackAIConfig = {
 const DEFAULT_SERVER_CONFIG: ServerConfig = {
   allowedOrigin: process.env.ALLOWED_ORIGIN?.trim() || '*',
   geminiBaseUrl: process.env.GEMINI_BASE_URL?.trim() || 'https://generativelanguage.googleapis.com',
-  maxConcurrentProjects: Number(process.env.MAX_CONCURRENT_PROJECTS) || 2,
+  maxConcurrentProjects: Number(process.env.MAX_CONCURRENT_PROJECTS) || 6,
   maxTotalParallelKeys: Number(process.env.MAX_PARALLEL_KEYS) || 19,
-  maxKeysPerProject: 1, // Strictly 1 dedicated key per file
+  maxKeysPerProject: 2,
 };
 
 function loadDatabaseFromDisk(): SubtitlesDatabase {
@@ -584,13 +586,13 @@ export function getServerConfig(): ServerConfig {
     db.serverConfig = { ...DEFAULT_SERVER_CONFIG };
     saveDatabaseSync();
   }
-  // Default to 2 concurrent projects if not set, allow any user-configured value between 1 and 24
+  // Default to 6 concurrent projects if not set, allow any user-configured value between 1 and 24
   if (!db.serverConfig.maxConcurrentProjects || db.serverConfig.maxConcurrentProjects < 1) {
-    db.serverConfig.maxConcurrentProjects = 2;
+    db.serverConfig.maxConcurrentProjects = 6;
   }
-  // Default to 1 key per project if not set
+  // Default to 2 keys per project if not set
   if (!db.serverConfig.maxKeysPerProject || db.serverConfig.maxKeysPerProject < 1) {
-    db.serverConfig.maxKeysPerProject = 1;
+    db.serverConfig.maxKeysPerProject = 2;
   }
   const idealParallelKeys = Math.max(allKeys.length, db.serverConfig.maxConcurrentProjects);
   if (!db.serverConfig.maxTotalParallelKeys || db.serverConfig.maxTotalParallelKeys < 1) {
@@ -1098,16 +1100,27 @@ const DAILY_COOLDOWN_MS = 14 * 60 * 60 * 1000; // 14 hours for daily quota limit
 export function isDailyQuotaError(errorMessage: string): boolean {
   if (!errorMessage) return false;
   const lower = String(errorMessage).toLowerCase();
+
+  // If error explicitly mentions minute, RPM, or TPM, it is 100% a short-term minute rate limit, NEVER daily!
+  if (
+    lower.includes('per minute') ||
+    lower.includes('per_minute') ||
+    lower.includes('requests per minute') ||
+    lower.includes('tokens per minute') ||
+    lower.includes('rpm') ||
+    lower.includes('tpm')
+  ) {
+    return false;
+  }
+
+  // Only classify as daily if Google explicitly specifies daily requests / per day
   return (
     lower.includes('requests per day') ||
     lower.includes('requests_per_day') ||
-    lower.includes('per-day') ||
-    lower.includes('per day') ||
-    lower.includes('daily') ||
-    lower.includes('perday') ||
-    lower.includes('daily limit') ||
-    (lower.includes('quota exceeded for quota metric') && lower.includes('day')) ||
-    (lower.includes('resource_exhausted') && lower.includes('day'))
+    lower.includes('per day per project') ||
+    lower.includes('daily request quota') ||
+    lower.includes('daily quota exceeded') ||
+    (lower.includes('quota exceeded for quota metric') && lower.includes('requests per day'))
   );
 }
 
@@ -1300,22 +1313,41 @@ export function clearSystemCacheAndResetStuckQueues(): {
 }
 
 export function recordKeyUsage(
-  key: string,
+  keyIdentifier: string,
   tokens: { prompt: number; candidates: number; total: number }
 ): void {
   const db = getDatabase();
   if (!db.keyStats) {
     db.keyStats = {};
   }
-  if (!db.keyStats[key]) {
-    db.keyStats[key] = { requestsCount: 0, promptTokens: 0, candidatesTokens: 0, totalTokens: 0 };
+  if (!db.keyStats[keyIdentifier]) {
+    db.keyStats[keyIdentifier] = { requestsCount: 0, promptTokens: 0, candidatesTokens: 0, totalTokens: 0 };
   }
-  const rec = db.keyStats[key];
+  const rec = db.keyStats[keyIdentifier];
   rec.requestsCount += 1;
   rec.promptTokens += (tokens.prompt || 0);
   rec.candidatesTokens += (tokens.candidates || 0);
   rec.totalTokens += (tokens.total || 0);
   rec.lastUsedAt = new Date().toISOString();
+
+  // Also sync token metrics to UnifiedKeyEntry in db.unifiedKeys for live UI display
+  if (Array.isArray(db.unifiedKeys)) {
+    const matched = db.unifiedKeys.find(
+      (k) =>
+        k.key === keyIdentifier ||
+        k.maskedKey === keyIdentifier ||
+        k.id === keyIdentifier ||
+        (k.maskedKey && keyIdentifier.includes(k.maskedKey)) ||
+        (keyIdentifier && k.key && keyIdentifier.includes(k.key.slice(0, 10)))
+    );
+    if (matched) {
+      matched.requestsCount = (matched.requestsCount || 0) + 1;
+      matched.totalTokens = (matched.totalTokens || 0) + (tokens.total || 0);
+      matched.promptTokens = (matched.promptTokens || 0) + (tokens.prompt || 0);
+      matched.candidatesTokens = (matched.candidatesTokens || 0) + (tokens.candidates || 0);
+      matched.lastUsedAt = new Date().toISOString();
+    }
+  }
 
   if (!db.stats) {
     db.stats = { totalTranslations: 0, totalTokensUsed: 0 };
@@ -1541,7 +1573,19 @@ export function getUnifiedKeys(): UnifiedKeyEntry[] {
     }
   }
 
-  return [...db.unifiedKeys].sort((a, b) => a.priority - b.priority);
+  return [...db.unifiedKeys]
+    .map((k) => {
+      const stats = db.keyStats?.[k.key] || db.keyStats?.[k.maskedKey] || db.keyStats?.[k.id];
+      if (stats) {
+        k.requestsCount = Math.max(k.requestsCount || 0, stats.requestsCount || 0);
+        k.totalTokens = Math.max(k.totalTokens || 0, stats.totalTokens || 0);
+        k.promptTokens = Math.max(k.promptTokens || 0, stats.promptTokens || 0);
+        k.candidatesTokens = Math.max(k.candidatesTokens || 0, stats.candidatesTokens || 0);
+        k.lastUsedAt = k.lastUsedAt || stats.lastUsedAt;
+      }
+      return k;
+    })
+    .sort((a, b) => a.priority - b.priority);
 }
 
 export function addUnifiedKeys(
